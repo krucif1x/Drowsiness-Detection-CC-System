@@ -40,4 +40,6 @@ try:
         app.run()
 
 except ImportError as e:
-    logging.critical
+    logging.critical(f"ImportError: {e}", exc_info=True)
+except Exception as e:
+    logging.critical(f"Fatal error: {e}", exc_info=True)

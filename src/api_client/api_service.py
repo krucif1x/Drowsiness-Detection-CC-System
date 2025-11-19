@@ -1,29 +1,11 @@
 # api_service.py
-"""
-Provides a simple service for interacting with the Drowsiness Detection API.
-
-This file's responsibility is to connect the "data" (event.py)
-with the "transport" (http_client.py) and "configuration" (config.py).
-
-Role: This is your Service Layer or "The Coordinator."
-
-Explanation: This file is the "manager" that brings everything together. It's the brains of your client. It knows what data to send (from event.py) and where to send it (from config.py), and it uses the "messenger" (from http_client.py) to do the work.
-
-Key Function: send_drowsiness_event(self, event: DrowsinessEvent)
-
-    payload = event.to_transport_payload(): Build exactly the JSON the server expects.
-
-    response = self.client.post(...): Send it as an HTTP POST to the drowsiness path.
-
-    logger.info(...): Log the outcome.
-"""
 import logging
 import uuid
 import requests
 from typing import Optional
 
 from .event import DrowsinessEvent
-from . import config
+from . import config  # <--- Syncing with config
 
 log = logging.getLogger(__name__)
 
@@ -37,12 +19,19 @@ class ApiResult:
 
 class ApiService:
     def __init__(self, base_url: str = config.SERVER_BASE_URL, timeout: float = config.DEFAULT_TIMEOUT):
+        """
+        Initialize the service.
+        :param base_url: The host URL (e.g. http://ip:port). Defaults to config.SERVER_BASE_URL.
+        """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # Strictly use the path defined in config
         self.path = config.DROWSINESS_EVENT_PATH
-        log.info("[API] target=%s%s timeout=%.1fs", self.base_url, self.path, self.timeout)
+        
+        log.info("[API] Initialized target=%s path=%s timeout=%.1fs", self.base_url, self.path, self.timeout)
 
     def _url(self) -> str:
+        """Constructs the full URL by combining Base + Path"""
         return f"{self.base_url}{self.path}"
 
     def send_drowsiness_event(self, event: DrowsinessEvent) -> ApiResult:
@@ -54,14 +43,18 @@ class ApiService:
             config.IDEMPOTENCY_HEADER: idem,
         }
         payload = event.to_transport_payload()
+        
+        full_url = self._url() # Resolves to http://IP:PORT/api/v1/drowsiness
+        
         try:
-            resp = requests.post(self._url(), json=payload, headers=headers, timeout=self.timeout)
+            resp = requests.post(full_url, json=payload, headers=headers, timeout=self.timeout)
             ok = 200 <= resp.status_code < 300
             result = ApiResult(ok, resp.status_code, resp.text, cid)
             if not ok:
                 result.error = f"HTTP {resp.status_code}"
             return result
         except requests.RequestException as e:
+            # This catches the ConnectTimeoutError and returns it safely
             r = ApiResult(False, 0, "", cid)
             r.error = str(e)
             return r

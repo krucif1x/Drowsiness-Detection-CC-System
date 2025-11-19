@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
-from src.infrastructure.data.user.profile import UserProfile
+from src.infrastructure.data.models import UserProfile
 from src.services.system_logger import SystemLogger
 
 @dataclass
@@ -90,9 +90,14 @@ class DrowsinessDetector:
             self.counters['LAUGH_SUPPRESS_COUNTER'] = max(0, self.counters['LAUGH_SUPPRESS_COUNTER'] - 1)
 
     def _update_drowsiness_episode(self, ear):
+        # Precompute thresholds once per user, not every frame
+        if not hasattr(self, '_ear_low'):
+            self._ear_low = self.dynamic_ear_threshold * 1.0
+            self._ear_high = self.dynamic_ear_threshold * 1.2
+
         is_suppressed = self.counters['SMILE_SUPPRESS_COUNTER'] > 0 or self.counters['LAUGH_SUPPRESS_COUNTER'] > 0
-        low = ear < (self.dynamic_ear_threshold * 1.0)
-        high = ear >= (self.dynamic_ear_threshold * 1.2)
+        low = ear < self._ear_low
+        high = ear >= self._ear_high
         
         if self.episode['active']:
             self.episode['min_ear'] = min(self.episode['min_ear'], ear)

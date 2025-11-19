@@ -6,7 +6,8 @@ from datetime import datetime
 from typing import Optional
 
 from src.services.remote_logger import RemoteLogWorker
-from src.infrastructure.data.drowsiness_events.repository import DrowsinessEventRepository
+from src.infrastructure.data.repository import UnifiedRepository
+from src.infrastructure.data.models import DrowsinessEvent
 
 class SystemLogger:
     """
@@ -16,7 +17,7 @@ class SystemLogger:
         self, 
         buzzer=None, 
         remote_worker: Optional[RemoteLogWorker] = None, 
-        event_repo: Optional[DrowsinessEventRepository] = None,
+        event_repo: Optional[UnifiedRepository] = None,
         vehicle_vin: str = "VIN-0001",
         local_quality: int = 85,
         remote_quality: int = 70
@@ -47,16 +48,18 @@ class SystemLogger:
 
         # 2. Local Save
         if self.repo:
-            self.repo.add_event_row(
+            event = DrowsinessEvent(
                 vehicle_identification_number=self.vehicle_vin,
                 user_id=user_id,
-                time=time_str,
                 status=event_type.lower(),
+                time=timestamp,
                 img_drowsiness=jpeg_local,
                 img_path=None,
-                duration=duration,
-                value=value
             )
+            # Optionally set duration and value if your model supports it
+            setattr(event, "duration", duration)
+            setattr(event, "value", value)
+            self.repo.add_event(event)
             logging.info(f"[LOG] Saved Local: {event_type}")
 
         # 3. Remote Push
@@ -79,7 +82,7 @@ class SystemLogger:
         elif level == "critical":  
             self.buzzer.beep(0.5, 0.5, background=True)
         elif level == "distraction": 
-            self.buzzer.beep(0.1, 0.1, background=True) # Removed the '2' arg
+            self.buzzer.beep(0.1, 0.1, background=True)
             
     def stop_alert(self):
         if self.buzzer: self.buzzer.off()

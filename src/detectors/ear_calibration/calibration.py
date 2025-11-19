@@ -55,7 +55,7 @@ def calibrate(calibrator) -> Union[None, float, Tuple[str, object]]:
                 
                 # Check result from background thread
                 if calibrator._user_check_result is not None:
-                    print(f"Recognized user '{calibrator._user_check_result.name}' detected.")
+                    print(f"Recognized user '{getattr(calibrator._user_check_result, 'full_name', calibrator._user_check_result.user_id)}' detected.")
                     return ('user_swap', calibrator._user_check_result)
 
                 # ❌ REMOVE: No color conversion needed - camera.py already returns RGB

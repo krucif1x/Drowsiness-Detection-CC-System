@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 from src.api_client.api_service import ApiService
 from src.api_client.event import DrowsinessEvent as ApiEvent
+from src.api_client import config # <--- Syncing with config
 
 log = logging.getLogger(__name__)
 
@@ -12,12 +13,24 @@ class RemoteLogWorker:
     RETRY_INTERVAL_SEC = 30
     MAX_QUEUE_SIZE = 100
     
-    def __init__(self, db_path: str, remote_api_url: Optional[str], enabled: bool = True):
+    def __init__(self, db_path: str, remote_api_url: Optional[str] = None, enabled: bool = True):
         self.enabled = enabled
-        self.api_service = ApiService(base_url=remote_api_url or "") if enabled else None
+        
+        # SYNCHRONIZATION FIX:
+        # If remote_api_url is None, use config.SERVER_BASE_URL.
+        target_base_url = remote_api_url if remote_api_url else config.SERVER_BASE_URL
+        
+        if enabled:
+            self.api_service = ApiService(base_url=target_base_url)
+            log.info(f"[REMOTE] Worker started (Base: {target_base_url})")
+        else:
+            self.api_service = None
+            log.info("[REMOTE] Worker disabled")
         
         # Queue DB connection
         self.queue_conn = sqlite3.connect(db_path, check_same_thread=False)
+        # We ensure the table exists. 
+        # Note: This table is for the RETRY QUEUE only.
         self.queue_conn.execute("""
             CREATE TABLE IF NOT EXISTS remote_event_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -38,14 +51,11 @@ class RemoteLogWorker:
         if self.enabled and self.api_service:
             self._retry_thread = threading.Thread(target=self._retry_loop, daemon=True)
             self._retry_thread.start()
-            log.info(f"[REMOTE] Worker started (URL: {remote_api_url})")
 
-    # --- FIX IS HERE: Renamed arguments to match SystemLogger ---
     def send_or_queue(self, vehicle_vin: str, user_id: int, status: str, 
                       time_dt: datetime, img_base64: Optional[str], img_path: Optional[str]):
         """
         Attempt to send immediately. If failed or offline, add to queue.
-        Arguments match SystemLogger calls exactly.
         """
         if not self.enabled or not self.api_service:
             return
@@ -69,9 +79,12 @@ class RemoteLogWorker:
             if res.success:
                 log.info(f"[REMOTE] ✓ Sent (CID: {res.correlation_id})")
                 return True
+            
+            # Log the specific error (e.g. Timeout)
+            log.warning(f"[REMOTE] Send failed: {res.error}")
             return False
         except Exception as e:
-            log.error(f"[REMOTE] Send failed: {e}")
+            log.error(f"[REMOTE] Send exception: {e}")
             return False
 
     def _queue(self, vin, uid, status, dt, b64, path):
@@ -79,9 +92,10 @@ class RemoteLogWorker:
             time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
             cur = self.queue_conn.cursor()
             
-            # Check size
+            # Check size limit
             cur.execute("SELECT COUNT(*) FROM remote_event_queue")
             if cur.fetchone()[0] >= self.MAX_QUEUE_SIZE:
+                # Delete oldest
                 cur.execute("DELETE FROM remote_event_queue WHERE id = (SELECT id FROM remote_event_queue ORDER BY created_at ASC LIMIT 1)")
             
             cur.execute("""

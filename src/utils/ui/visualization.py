@@ -92,3 +92,9 @@ class Visualizer:
         fps_text = f"FPS: {fps:.2f}"
         (text_width, _), _ = cv2.getTextSize(fps_text, self.FONT, 0.7, 2)
         cv2.putText(image, fps_text, (w - text_width - 10, 30), self.FONT, 0.7, self.COLOR_GREEN, 2)
+        
+    def draw_no_face_text(self, display):
+        import cv2
+        h, w = display.shape[:2]
+        cv2.putText(display, "NO FACE DETECTED", (w//2 - 100, h//2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
