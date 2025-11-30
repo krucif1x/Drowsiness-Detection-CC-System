@@ -1,6 +1,6 @@
 """
-HEAD POSE ESTIMATOR - SIMPLE & RELIABLE
-Uses your original model points with proper roll angle handling.
+HEAD POSE ESTIMATOR - YOUR WORKING VERSION + CAMERA SPECS
+Minimal changes to your original working code.
 """
 
 import cv2
@@ -24,13 +24,26 @@ LANDMARK_INDICES = [1, 152, 33, 263, 61, 291]
 
 
 class HeadPoseEstimator:
-    """Simple head pose estimator with fixed roll handling."""
+    """Simple head pose estimator with camera specs."""
     
-    def __init__(self):
+    def __init__(self, camera_specs=None):
+        """
+        Args:
+            camera_specs: Optional dict with 'focal_mm', 'sensor_w_mm', 'sensor_h_mm'
+                         If None, uses simple focal_length = img_w approximation
+        """
         self.model_points = MODEL_POINTS
         self.landmark_indices = LANDMARK_INDICES
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1))
+        
+        # Camera specs (optional - if None, will use simple approximation)
+        self.camera_specs = camera_specs or {
+            "focal_mm": 3.67,
+            "sensor_w_mm": 4.8,
+            "sensor_h_mm": 3.6
+        }
+        self.use_camera_specs = camera_specs is not None
         
         # PnP state
         self.rvec = None
@@ -48,20 +61,33 @@ class HeadPoseEstimator:
         self.ALPHA_YAW = 0.5
         self.ALPHA_ROLL = 0.3
         
-        logger.info("HeadPoseEstimator initialized (Fixed roll clamping)")
+        logger.info("HeadPoseEstimator initialized")
 
     def calculate_pose(self, face_landmarks, img_w, img_h):
         """Calculate head pose angles."""
         try:
             # Initialize camera matrix
             if self.camera_matrix is None:
-                focal_length = img_w
-                center = (img_w / 2, img_h / 2)
-                self.camera_matrix = np.array([
-                    [focal_length, 0, center[0]],
-                    [0, focal_length, center[1]],
-                    [0, 0, 1]
-                ], dtype=np.float64)
+                if self.use_camera_specs:
+                    # Use accurate camera specs
+                    focal_length_x = (self.camera_specs["focal_mm"] / self.camera_specs["sensor_w_mm"]) * img_w
+                    focal_length_y = (self.camera_specs["focal_mm"] / self.camera_specs["sensor_h_mm"]) * img_h
+                    center = (img_w / 2, img_h / 2)
+                    self.camera_matrix = np.array([
+                        [focal_length_x, 0, center[0]],
+                        [0, focal_length_y, center[1]],
+                        [0, 0, 1]
+                    ], dtype=np.float64)
+                    logger.info(f"Camera matrix: fx={focal_length_x:.2f}, fy={focal_length_y:.2f}")
+                else:
+                    # Simple approximation (your original)
+                    focal_length = img_w
+                    center = (img_w / 2, img_h / 2)
+                    self.camera_matrix = np.array([
+                        [focal_length, 0, center[0]],
+                        [0, focal_length, center[1]],
+                        [0, 0, 1]
+                    ], dtype=np.float64)
             
             # Get 2D image points
             image_points = np.array([
@@ -99,9 +125,7 @@ class HeadPoseEstimator:
             yaw_raw = angles[1]
             roll_raw = angles[2]
             
-            # FIX: Normalize roll to [-90, +90] range
-            # RQDecomp3x3 sometimes returns roll in [-180, +180]
-            # We want to constrain it to head tilt range
+            # Normalize roll to [-90, +90] range
             if roll_raw > 90:
                 roll_raw = roll_raw - 180
             elif roll_raw < -90:
