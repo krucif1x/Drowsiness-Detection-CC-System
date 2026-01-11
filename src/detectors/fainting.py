@@ -43,17 +43,17 @@ class FaintingDetector:
 
     def _load_config(self, path: str, fps: float):
         defaults = {
-            'pitch_extreme': 45.0,          # deg above camera_pitch
-            'rapid_change': 12.0,           # deg over history window
-            'history_sec': 0.6,             # seconds for pitch/face trend window
-            'vis_window_sec': 0.6,          # seconds for vis smoothing
-            'slump_trend_min': 0.006,       # downward slope threshold
-            'min_confirm_sec': 0.8,         # minimum duration to confirm faint
+            'pitch_extreme': 55.0,          # INCREASED from 45.0 to reduce false positives
+            'rapid_change': 15.0,           # INCREASED from 12.0
+            'history_sec': 0.8,             # INCREASED from 0.6 for more stability
+            'vis_window_sec': 1.0,          # INCREASED from 0.6 for more stability
+            'slump_trend_min': 0.008,       # INCREASED from 0.006
+            'min_confirm_sec': 1.2,         # INCREASED from 0.8
             'phone_pitch_min': 18.0,
             'phone_pitch_max': 38.0,
             'var_stable_max': 5.0,
             'var_unstable_min': 10.0,
-            'prob_threshold': 0.7,          # higher threshold to reduce false positives
+            'prob_threshold': 0.75,         # INCREASED from 0.7
             'vis_face_thr': 0.40,
             'vis_sh_thr': 0.35
         }
@@ -195,7 +195,7 @@ class FaintingDetector:
     def analyze(self, pitch: float, yaw: float, roll: float, hands=None, face_center=None):
         # sanity on angles
         if not (abs(pitch) < 90 and abs(yaw) < 90):
-            return False, False
+            return False, False, None
 
         inds = self._indicators(pitch, face_center)
         score = self._score(inds)
@@ -215,11 +215,18 @@ class FaintingDetector:
                 self.is_fainting = True
                 self.metrics['total_faints'] += 1
                 log.critical(f"FAINT DETECTED (prob={self.faint_probability:.2f})")
-                return True, True
-            return True, False
+                
+                # Fainting is ALWAYS Critical - no duration needed
+                fainting_info = {
+                    'probability': self.faint_probability,
+                    'severity': 'Critical',  # Always critical
+                    'alert_detail': 'Possible Fainting or Collapse'
+                }
+                return True, True, fainting_info
+            return True, False, None
         else:
             self.is_fainting = False
-            return False, False
+            return False, False, None
 
     def get_status(self):
         return {'is_fainting': self.is_fainting, 'faint_prob': self.faint_probability, 'metrics': self.metrics}

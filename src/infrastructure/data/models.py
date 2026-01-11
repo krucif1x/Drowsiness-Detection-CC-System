@@ -32,6 +32,13 @@ class DrowsinessEvent:
     time: datetime = field(default_factory=datetime.now)
     img_drowsiness: Optional[str] = None
     img_path: Optional[str] = None
+    duration: float = 0.0
+    value: float = 0.0  # User's EAR threshold at time of event
+    
+    # Management-friendly fields (Power BI ready)
+    alert_category: Optional[str] = None  # "Drowsiness" or "Distraction" or "Critical Alert"
+    alert_detail: Optional[str] = None    # "Eyes Closed Too Long", "Looking Left", etc.
+    severity: Optional[str] = None         # "Low", "Medium", "High", "Critical"
 
     def _fmt_time(self) -> str:
         return self.time.strftime("%Y-%m-%d %H:%M:%S")
@@ -46,5 +53,11 @@ class DrowsinessEvent:
             "time": self._fmt_time(),
             "status": status_norm,
             "img_drowsiness": self.img_drowsiness,
+            "duration": self.duration,
+            "value": self.value,
+            # Management-friendly fields
+            "alert_category": self.alert_category,
+            "alert_detail": self.alert_detail,
+            "severity": self.severity,
         }
         return payload

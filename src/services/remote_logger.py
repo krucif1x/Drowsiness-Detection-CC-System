@@ -32,7 +32,10 @@ class RemoteLogWorker:
                 vehicle_vin TEXT, 
                 user_id INTEGER, 
                 status TEXT, 
-                time TEXT
+                time TEXT,
+                alert_category TEXT,
+                alert_detail TEXT,
+                severity TEXT
             )
         """)
         self.queue_conn.commit()
@@ -50,48 +53,58 @@ class RemoteLogWorker:
             self._retry_thread.start()
 
     def send_or_queue(self, vehicle_vin: str, user_id: int, status: str, 
-                      time_dt: datetime, raw_jpeg: Optional[bytes]):
-        """Push into immediate queue; follow DB time format and ApiEvent expectations."""
+                      time_dt: datetime, raw_jpeg: Optional[bytes],
+                      alert_category: Optional[str] = None,
+                      alert_detail: Optional[str] = None,
+                      severity: Optional[str] = None):
+        """Push into immediate queue with new management fields."""
         if not (self.enabled and self.api_service):
             return
         try:
-            self._immediate_q.put_nowait((vehicle_vin, user_id, status, time_dt, raw_jpeg))
+            self._immediate_q.put_nowait((
+                vehicle_vin, user_id, status, time_dt, raw_jpeg,
+                alert_category, alert_detail, severity
+            ))
         except queue.Full:
             log.warning("[REMOTE] Immediate queue full; falling back to persistent queue")
-            self._queue(vehicle_vin, user_id, status, time_dt, raw_jpeg)
+            self._queue(vehicle_vin, user_id, status, time_dt, raw_jpeg, 
+                       alert_category, alert_detail, severity)
 
-    def _send_event(self, vin, uid, status, dt, jpeg_bytes) -> bool:
-        """Send to API. ApiService expects event.time as datetime; event.py formats to 'YYYY-MM-DD HH:MM:SS'."""
+    def _send_event(self, vin, uid, status, dt, jpeg_bytes, 
+                    alert_category=None, alert_detail=None, severity=None) -> bool:
+        """Send to API with new fields."""
         try:
-            # Coerce dt -> datetime
             if isinstance(dt, datetime):
                 dt_obj = dt
             else:
-                # If caller provided a string or anything else, ignore and use now
                 dt_obj = datetime.now()
 
-            # Base64 if image present
             b64 = None
             if jpeg_bytes:
                 import base64
                 b64 = base64.b64encode(jpeg_bytes).decode("ascii")
 
+            # Create event with extended fields
             event = ApiEvent(
                 vehicle_identification_number=vin,
                 user_id=uid,
                 status=status,
-                time=dt_obj,           # datetime object (event.py will strftime it)
+                time=dt_obj,
                 img_drowsiness=b64,
                 img_path=None
             )
-
-            # Final safety: ensure event.time is datetime (not str)
-            if not isinstance(event.time, datetime):
-                event.time = datetime.now()
+            
+            # Add new fields if ApiEvent supports them (update ApiEvent class)
+            if hasattr(event, 'alert_category'):
+                event.alert_category = alert_category
+            if hasattr(event, 'alert_detail'):
+                event.alert_detail = alert_detail
+            if hasattr(event, 'severity'):
+                event.severity = severity
 
             res = self.api_service.send_drowsiness_event(event)
             if getattr(res, "success", False):
-                log.info(f"[REMOTE] ✓ Sent (CID: {getattr(res, 'correlation_id', '-')})")
+                log.info(f"[REMOTE] ✓ Sent {alert_category or status} (CID: {getattr(res, 'correlation_id', '-')})")
                 return True
             log.warning(f"[REMOTE] Send failed: {getattr(res, 'error', 'unknown error')}")
             return False
@@ -102,19 +115,26 @@ class RemoteLogWorker:
     def _send_loop(self):
         while not self._stop_event.is_set():
             try:
-                vin, uid, status, dt, jpeg_bytes = self._immediate_q.get(timeout=0.25)
-                ok = self._send_event(vin, uid, status, dt, jpeg_bytes)
+                data = self._immediate_q.get(timeout=0.25)
+                vin, uid, status, dt, jpeg_bytes = data[:5]
+                alert_category = data[5] if len(data) > 5 else None
+                alert_detail = data[6] if len(data) > 6 else None
+                severity = data[7] if len(data) > 7 else None
+                
+                ok = self._send_event(vin, uid, status, dt, jpeg_bytes,
+                                     alert_category, alert_detail, severity)
                 if not ok:
-                    self._queue(vin, uid, status, dt, jpeg_bytes)
+                    self._queue(vin, uid, status, dt, jpeg_bytes,
+                               alert_category, alert_detail, severity)
             except queue.Empty:
                 pass
             except Exception as e:
                 log.error(f"[REMOTE] Send loop error: {e}")
 
-    def _queue(self, vin, uid, status, dt, jpeg_bytes):
-        """Persist to DB using simple time format 'YYYY-mm-dd HH:MM:SS' (matches your table)."""
+    def _queue(self, vin, uid, status, dt, jpeg_bytes,
+               alert_category=None, alert_detail=None, severity=None):
+        """Persist to DB with new fields."""
         try:
-            # Normalize dt to DB string
             if isinstance(dt, datetime):
                 t_str = dt.strftime("%Y-%m-%d %H:%M:%S")
             else:
@@ -124,12 +144,15 @@ class RemoteLogWorker:
             cur.execute("SELECT COUNT(*) FROM remote_event_queue")
             if cur.fetchone()[0] >= self.MAX_QUEUE_SIZE:
                 cur.execute("DELETE FROM remote_event_queue WHERE id = (SELECT id FROM remote_event_queue ORDER BY id ASC LIMIT 1)")
+            
+            # Update table to include new fields
             cur.execute("""
-                INSERT INTO remote_event_queue (vehicle_vin, user_id, status, time)
-                VALUES (?,?,?,?)
-            """, (vin, uid, status, t_str))
+                INSERT INTO remote_event_queue 
+                (vehicle_vin, user_id, status, time, alert_category, alert_detail, severity)
+                VALUES (?,?,?,?,?,?,?)
+            """, (vin, uid, status, t_str, alert_category, alert_detail, severity))
             self.queue_conn.commit()
-            log.info("[REMOTE] ⧖ Queued")
+            log.info(f"[REMOTE] ⧖ Queued: {alert_detail or status}")
         except Exception as e:
             log.error(f"[REMOTE] Queue error: {e}")
 

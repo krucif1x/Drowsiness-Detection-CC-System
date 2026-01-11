@@ -21,6 +21,7 @@ class UnifiedDatabase:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            
             # User Profiles
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_profiles (
@@ -35,7 +36,8 @@ class UnifiedDatabase:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON user_profiles(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_last_seen ON user_profiles(last_seen)")
-            # Drowsiness Events
+            
+            # Drowsiness Events - Simplified for management
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS drowsiness_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,11 +47,39 @@ class UnifiedDatabase:
                     status TEXT,
                     img_drowsiness BLOB,
                     duration REAL DEFAULT 0.0,
-                    value REAL DEFAULT 0.0
+                    value REAL DEFAULT 0.0,
+                    
+                    -- Management-friendly fields
+                    alert_category TEXT,
+                    alert_detail TEXT,
+                    severity TEXT
                 )
             """)
+            
+            # MIGRATION: Add new columns if table already exists
+            cursor = conn.execute("PRAGMA table_info(drowsiness_events)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            
+            new_columns = {
+                'alert_category': 'TEXT',
+                'alert_detail': 'TEXT',
+                'severity': 'TEXT'
+            }
+            
+            for col_name, col_type in new_columns.items():
+                if col_name not in existing_columns:
+                    try:
+                        conn.execute(f"ALTER TABLE drowsiness_events ADD COLUMN {col_name} {col_type}")
+                        logging.info(f"✓ Added column: {col_name}")
+                    except sqlite3.OperationalError as e:
+                        logging.warning(f"Column {col_name} might already exist: {e}")
+            
+            # Create indexes for Power BI performance
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON drowsiness_events(time)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_user ON drowsiness_events(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_category ON drowsiness_events(alert_category)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON drowsiness_events(severity)")
+            
             conn.commit()
 
     def execute(self, query: str, params: tuple = (), fetch: bool = False):

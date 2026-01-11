@@ -57,11 +57,14 @@ class UnifiedRepository:
     # --- DROWSINESS EVENT METHODS ---
     def add_event(self, event: DrowsinessEvent) -> int:
         try:
+            logging.debug(f"🔍 Inserting event: {event.alert_category} - {event.alert_detail}")
+            
             rowid = self.db.execute(
                 """
                 INSERT INTO drowsiness_events
-                (vehicle_identification_number, user_id, time, status, img_drowsiness, duration, value)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (vehicle_identification_number, user_id, time, status, img_drowsiness, 
+                 duration, value, alert_category, alert_detail, severity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.vehicle_identification_number,
@@ -69,14 +72,17 @@ class UnifiedRepository:
                     event.time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(event.time, "strftime") else str(event.time),
                     event.status,
                     event.img_drowsiness,
-                    getattr(event, "duration", 0.0),
-                    getattr(event, "value", 0.0),
+                    event.duration,
+                    event.value,
+                    event.alert_category,
+                    event.alert_detail,
+                    event.severity,
                 ),
             )
-            logging.info(f"Event saved: id={rowid} type={event.status} dur={getattr(event, 'duration', 0.0):.1f}s val={getattr(event, 'value', 0.0):.2f}")
+            logging.info(f"✅ Event saved: row_id={rowid}, {event.alert_category} - {event.alert_detail} ({event.severity})")
             return int(rowid)
         except Exception as e:
-            logging.error(f"Database Insert Failed: {e}")
+            logging.error(f"❌ Database Insert Failed: {e}", exc_info=True)
             return -1
 
     def get_all_events(self) -> list[tuple]:

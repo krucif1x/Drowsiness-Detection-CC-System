@@ -19,7 +19,7 @@ else:
 # -----------------------------------------------------------
 # Without this, your logging.info() calls inside the app might not show up!
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Changed back from DEBUG to INFO
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )

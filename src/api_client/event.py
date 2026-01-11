@@ -23,6 +23,11 @@ class DrowsinessEvent:
     img_drowsiness: Optional[str] = None  # Screenshot data (base64 encoded)
     img_path: Optional[str] = None  # Path to the image file
 
+    # NEW: Add management fields
+    alert_category: Optional[str] = None
+    alert_detail: Optional[str] = None
+    severity: Optional[str] = None
+
     def _fmt_time(self) -> str:
         # Server expects "YYYY-MM-DD HH:MM:SS"
         return self.time.strftime("%Y-%m-%d %H:%M:%S")

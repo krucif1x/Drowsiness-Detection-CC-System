@@ -31,13 +31,17 @@ class DistractionDetector:
         # Metrics
         self.metrics = {'total_distractions': 0}
 
+        # NEW: Track partial face visibility
+        self.face_visibility_history = deque(maxlen=10)
+        self.partial_face_threshold = 0.4  # 40% of face visible is enough
+
         log.info("DistractionDetector initialized (Simple hand-based)")
 
     def _load_config(self, path, fps):
         defaults = {
-            'yaw_threshold': 40.0,           # degrees - extreme head turn
-            'pitch_down_threshold': 28.0,    # degrees - looking way down
-            'pitch_up_threshold': 25.0,      # degrees - looking way up
+            'yaw_threshold': 45.0,           # degrees - extreme head turn
+            'pitch_down_threshold': 20.0,    # degrees - looking way down
+            'pitch_up_threshold': 20.0,      # degrees - looking way up
             'time_hands_visible': 1.5,       # seconds with hands visible before unsafe
             'time_gaze': 1.2,                # seconds looking away (reduced from 2.5)
         }
@@ -56,52 +60,83 @@ class DistractionDetector:
             log.warning(f"Failed to load distraction config: {e}, using defaults")
             return defaults
 
-    def analyze(self, pitch, yaw, roll, hands=None, face=None):
+    def set_face_visibility(self, face_detection_confidence):
         """
-        Simple logic for face+shoulders camera view:
-        1. If ANY hand visible in frame = hands off wheel (unsafe)
-        2. If head angle extreme = looking away (unsafe)
+        Call this each frame with face detection confidence (0.0-1.0)
+        Helps distinguish between "face turned away" vs "no face detected"
+        """
+        self.face_visibility_history.append(face_detection_confidence if face_detection_confidence else 0.0)
+
+    def _is_face_present(self):
+        """Check if face is at least partially visible"""
+        if len(self.face_visibility_history) < 5:
+            return True  # Benefit of doubt during startup
         
-        Returns (is_distracted, is_new_event)
+        recent_vis = list(self.face_visibility_history)[-5:]
+        avg_vis = sum(recent_vis) / len(recent_vis)
+        return avg_vis >= self.partial_face_threshold
+
+    def analyze(self, pitch, yaw, roll, hands=None, face=None, is_drowsy=False, is_fainting=False):
         """
+        Simple logic for face+shoulders camera view with priority handling.
+        
+        Returns: (is_distracted, is_new_event, distraction_info)
+        """
+        # If fainting detected, don't report distraction
+        if is_fainting:
+            self.start_time = None
+            self.is_distracted = False
+            return False, False, None
+            
         if not (abs(pitch) < 90 and abs(yaw) < 90):
-            return False, False
+            return False, False, None
 
-        # Check for hands in frame (any hand = distraction)
         hands_visible = hands and len(hands) > 0
-
-        # Check head pose violations
         dp = pitch - self.cal['pitch']
         dy = abs(yaw - self.cal['yaw'])
         
-        gaze_violation = (
-            dy > self.cfg['yaw_threshold'] or 
-            dp > self.cfg['pitch_down_threshold'] or 
-            dp < -self.cfg['pitch_up_threshold']
-        )
+        # Separate gaze violations based on direction
+        looking_aside = dy > self.cfg['yaw_threshold']
+        looking_down = dp > self.cfg['pitch_down_threshold']
+        looking_up = dp < -self.cfg['pitch_up_threshold']
+        
+        # If drowsy and looking down, don't count as distraction
+        if is_drowsy and looking_down:
+            self.start_time = None
+            self.is_distracted = False
+            return False, False, None
 
-        # Determine violation type and threshold
         violation_type = None
         time_threshold = None
+        alert_detail = None
+        base_severity = "Medium"
 
         if hands_visible:
             num_hands = len(hands)
             if num_hands == 1:
                 violation_type = "ONE HAND OFF WHEEL"
+                alert_detail = "One Hand Off Wheel"
+                base_severity = "Medium"
             else:
                 violation_type = "BOTH HANDS OFF WHEEL"
+                alert_detail = "Both Hands Off Wheel"
+                base_severity = "High"  # Both hands always High
             time_threshold = self.cfg['time_hands_visible']
-        elif gaze_violation:
-            if dy > self.cfg['yaw_threshold']:
-                violation_type = "LOOKING ASIDE"
-            elif dp > self.cfg['pitch_down_threshold']:
-                violation_type = "LOOKING DOWN"
-            else:
-                violation_type = "LOOKING UP"
+        elif looking_aside:
+            violation_type = "LOOKING ASIDE"
+            alert_detail = "Looking Away from Road"
+            base_severity = "Medium"
             time_threshold = self.cfg['time_gaze']
-        else:
-            # No hands visible and good head pose = SAFE (hands on wheel below camera)
-            violation_type = None
+        elif looking_up:
+            violation_type = "LOOKING UP"
+            alert_detail = "Looking Up Away from Road"
+            base_severity = "Medium"
+            time_threshold = self.cfg['time_gaze']
+        elif looking_down and not is_drowsy:
+            violation_type = "LOOKING DOWN"
+            alert_detail = "Looking Down at Device"
+            base_severity = "Medium"
+            time_threshold = self.cfg['time_gaze']
 
         # Track in history
         self.history.append(violation_type is not None)
@@ -110,7 +145,6 @@ class DistractionDetector:
         history_sum = sum(self.history)
         if history_sum >= 3 and violation_type:
             if self.start_time is None or self.distraction_type != violation_type:
-                # New violation or type changed - reset timer
                 self.start_time = time.time()
                 self.distraction_type = violation_type
             
@@ -121,18 +155,33 @@ class DistractionDetector:
                     # New distraction event
                     self.is_distracted = True
                     self.metrics['total_distractions'] += 1
-                    return True, True
+                    
+                    # Determine final severity based on type + duration
+                    if "BOTH HANDS" in violation_type:
+                        final_severity = "High"  # Always high
+                    elif elapsed >= 3.0:
+                        final_severity = "High"  # Long duration
+                    else:
+                        final_severity = base_severity
+                    
+                    # Return info dict for logging
+                    distraction_info = {
+                        'alert_detail': alert_detail,
+                        'severity': final_severity,
+                        'duration': elapsed
+                    }
+                    return True, True, distraction_info
                 else:
                     # Ongoing distraction
-                    return True, False
+                    return True, False, None
             
-            return False, False
+            return False, False, None
         else:
             # No stable violation - reset
             self.start_time = None
             self.is_distracted = False
             self.distraction_type = "NORMAL"
-            return False, False
+            return False, False, None
 
     def get_status(self):
         return {

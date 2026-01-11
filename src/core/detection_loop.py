@@ -9,7 +9,7 @@ from src.mediapipe.head_pose import HeadPoseEstimator
 from src.mediapipe.hand import MediaPipeHandsWrapper
 from src.detectors.drowsiness import DrowsinessDetector
 from src.detectors.distraction import DistractionDetector
-from src.detectors.fainting import FaintingDetector  # NEW: integrate fainting
+from src.detectors.fainting import FaintingDetector
 from src.detectors.expression import MouthExpressionClassifier 
 
 log = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class DetectionLoop:
         self.user_manager = user_manager
         self.logger = system_logger
         self.visualizer = Visualizer()
-        self._post_calibration_cooldown = 0  # Add this line
+        self._post_calibration_cooldown = 0
         
         # Initialize Core Calibrator
         self.ear_calibrator = EARCalibrator(self.camera, self.face_mesh, self.user_manager)
@@ -37,15 +37,14 @@ class DetectionLoop:
             config_path=detector_config_path
         )
         
-        # NEW: Fainting detector
+        # Fainting detector
         self.fainting_detector = FaintingDetector(
             fps=fps,
             camera_pitch=0.0,
             config_path=detector_config_path
         )
         
-        # Link detectors for Fainting Logic (legacy note kept; fainting is now separate)
-        self.detector.set_last_frame(None)  # ensure safe default
+        self.detector.set_last_frame(None)
         
         self.head_pose_estimator = HeadPoseEstimator()
         self.expression_classifier = MouthExpressionClassifier()
@@ -70,12 +69,12 @@ class DetectionLoop:
         
         # Buffer to prevent instant calibration
         self.recognition_patience = 0
-        self.RECOGNITION_THRESHOLD = 45  # ~1.5 seconds
+        self.RECOGNITION_THRESHOLD = 45
 
         # --- OPTIMIZATION VARIABLES ---
-        self.HAND_INFERENCE_INTERVAL = 5     # Run hand detection every 5 frames
-        self.USER_SEARCH_INTERVAL = 30       # Search for user every 30 frames (1 sec)
-        self._cached_hands_data = []         # Store hand data for skipped frames
+        self.HAND_INFERENCE_INTERVAL = 5
+        self.USER_SEARCH_INTERVAL = 30
+        self._cached_hands_data = []
 
     def run(self):
         log.info("Starting Optimized Detection Loop...")
@@ -83,14 +82,11 @@ class DetectionLoop:
             while True:
                 self.process_frame()
                 
-                # --- CRITICAL FIX: GUI EVENT LOOP ---
-                # cv2.waitKey(1) processes window events. Without this, the window freezes.
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord('q') or key == 27: # Q or ESC to quit
+                if key == ord('q') or key == 27:
                     break
                 elif key == ord('d'):
                     self._show_debug_deltas = not self._show_debug_deltas
-                # ------------------------------------
 
         finally:
             self.hand_wrapper.close()
@@ -98,22 +94,21 @@ class DetectionLoop:
             self.camera.release()
             
     def process_frame(self):
-        frame = self.camera.read()  # Already RGB from camera.py
+        frame = self.camera.read()
         if frame is None: 
             return
 
         self._frame_idx += 1
         fps = self.fps_tracker.update()
 
-        # Use RGB directly for MediaPipe (no conversion needed)
         results = self.face_mesh.process(frame)
 
-        # Hand inference on RGB (every N frames)
+        # Hand inference (every N frames)
         if self._frame_idx % self.HAND_INFERENCE_INTERVAL == 0:
             self._cached_hands_data = self.hand_wrapper.infer(frame, preprocessed=True)
         hands_data = self._cached_hands_data
 
-        # Convert to BGR for OpenCV display
+        # Convert to BGR for display
         display = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         if self.current_mode == 'WAITING_FOR_USER':
@@ -121,21 +116,27 @@ class DetectionLoop:
         elif self.current_mode == 'DETECTING':
             self.detection(frame, display, results, hands_data, fps)
 
-        # Draw mode indicator
         cv2.putText(display, f"MODE: {self.current_mode}", (10, 20), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
         
-        # Display BGR frame directly (no conversion needed)
         cv2.imshow("Drowsiness System", display)
 
 
     def detection(self, frame, display, results, hands_data, fps):
         if not results.multi_face_landmarks: 
+            # Update face visibility tracker even when no face detected
+            self.distraction_detector.set_face_visibility(0.0)
             self.visualizer.draw_no_face_text(display)
             return
         
         h, w = frame.shape[:2]
         raw_lms = results.multi_face_landmarks[0]
+        
+        # Get face detection confidence from MediaPipe
+        face_confidence = 1.0  # Default
+        if hasattr(raw_lms.landmark[0], 'visibility'):
+            face_confidence = raw_lms.landmark[0].visibility
+        self.distraction_detector.set_face_visibility(face_confidence)
         
         # Head Pose (degrees)
         pose = self.head_pose_estimator.calculate_pose(raw_lms, w, h)
@@ -163,7 +164,15 @@ class DetectionLoop:
         # Expression
         expr = self.expression_classifier.classify(lms, h, hands_data=hands_data)
 
-        # Drowsiness
+        # Normalize hands to 0..1
+        norm_hands = []
+        if hands_data:
+            for hand in hands_data:
+                norm_hand = [(pt[0] / w, pt[1] / h) for pt in hand]
+                norm_hands.append(norm_hand)
+
+        # ==================== DETECTION HIERARCHY ====================
+        # STEP 1: Drowsiness Detection (eyes closed)
         self.detector.set_last_frame(frame)
         drowsy_status, drowsy_color = self.detector.detect(
             avg_ear, mar, expr, 
@@ -175,82 +184,108 @@ class DetectionLoop:
         is_drowsy = drowsy_state.get('is_drowsy', False)
         eyes_closed = self.detector.states.get('EYES_CLOSED', False)
 
-        # Normalize hands to 0..1 for distraction detector
-        norm_hands = []
-        if hands_data:
-            for hand in hands_data:
-                norm_hand = [(pt[0] / w, pt[1] / h) for pt in hand]
-                norm_hands.append(norm_hand)
-
-        # Distraction with normalized hands
-        is_distracted, should_log_distraction = self.distraction_detector.analyze(
-            pitch, yaw, roll,
-            hands=norm_hands,  # ✅ Normalized
-            face=face_center_norm
-        )
-
-        # Fainting - simplified (no phone/wheel context in new detector)
+        # STEP 2: Fainting Detection (HIGHEST PRIORITY)
         self.fainting_detector.set_context(
             drowsy=is_drowsy,
             eyes_closed=eyes_closed,
-            phone=False,  # ✅ Removed context dependency
-            wheel_count=0  # ✅ Removed context dependency
+            phone=False,
+            wheel_count=0
         )
-        is_fainting, faint_is_new = self.fainting_detector.analyze(
-            pitch=pitch, yaw=yaw, roll=roll, hands=norm_hands, face_center=face_center_norm
+        is_fainting, faint_is_new, faint_info = self.fainting_detector.analyze(
+            pitch=pitch, yaw=yaw, roll=roll, 
+            hands=norm_hands, 
+            face_center=face_center_norm
         )
 
-        # Status & UI Logic
-        final_status = drowsy_status
-        final_color = drowsy_color
+        # STEP 3: Distraction Detection (LOWEST PRIORITY - passes both flags)
+        is_distracted, should_log_distraction, distraction_info = self.distraction_detector.analyze(
+            pitch, yaw, roll,
+            hands=norm_hands,
+            face=face_center_norm,
+            is_drowsy=is_drowsy,
+            is_fainting=is_fainting
+        )
 
-        if "CALIBRATING" in drowsy_status:
-            final_status = drowsy_status 
-            final_color = (255, 255, 0)
-            if is_distracted:
-                cv2.putText(display, "LOOK FORWARD", (w//2 - 100, h//2), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        elif is_fainting:
+        # ==================== PRIORITY-BASED STATUS ====================
+        final_status = "NORMAL"
+        final_color = (0, 255, 0)
+
+        # Priority 1: Fainting (CRITICAL)
+        if is_fainting:
             final_status = "FAINTING!"
             final_color = (255, 0, 255)
-            if faint_is_new:
+            if faint_is_new and faint_info:
+                log.critical("FAINTING DETECTED!")
                 self.logger.alert("fainting")
                 self.logger.log_event(
                     getattr(self.user, 'user_id', 0),
                     "FAINTING",
                     0.0,
-                    float(self.fainting_detector.faint_probability),
-                    frame
+                    float(faint_info.get('probability', 0.0)),
+                    frame,
+                    alert_category="Critical Alert",
+                    alert_detail=faint_info.get('alert_detail', 'Possible Fainting or Collapse'),
+                    severity=faint_info.get('severity', 'Critical')  # Use from detector
                 )
-        elif "SLEEP" in drowsy_status or "YAWN" in drowsy_status or "DROWSY" in drowsy_status:
-            pass
+        
+        # Priority 2: Drowsiness (HIGH)
+        elif "DROWSY" in drowsy_status or "YAWN" in drowsy_status or "SLEEP" in drowsy_status:
+            final_status = drowsy_status
+            final_color = drowsy_color
+        
+        # Priority 3: Distraction (MEDIUM)
         elif is_distracted:
             reason = self.distraction_detector.distraction_type
             
             if "BOTH HANDS" in reason:
                 final_status = "BOTH HANDS VISIBLE!"
-                final_color = (0, 0, 255)  # Red
+                final_color = (0, 0, 255)
+                alert_detail = "Both Hands Off Wheel"
+                severity = "High"
             elif "ONE HAND" in reason:
                 final_status = "ONE HAND VISIBLE"
-                final_color = (0, 165, 255)  # Orange
+                final_color = (0, 165, 255)
+                alert_detail = "One Hand Off Wheel"
+                severity = "Medium"
             elif "ASIDE" in reason:
                 final_status = "LOOKING ASIDE"
-                final_color = (0, 255, 255)  # Yellow
+                final_color = (0, 255, 255)
+                alert_detail = "Looking Away from Road"
+                severity = "Medium"
             elif "DOWN" in reason:
                 final_status = "LOOKING DOWN"
-                final_color = (0, 255, 255)  # Yellow
+                final_color = (0, 255, 255)
+                alert_detail = "Looking Down at Device"
+                severity = "Medium"
             elif "UP" in reason:
                 final_status = "LOOKING UP"
-                final_color = (0, 255, 255)  # Yellow
+                final_color = (0, 255, 255)
+                alert_detail = "Looking Up Away from Road"
+                severity = "Medium"
             else:
                 final_status = "DISTRACTED"
                 final_color = (0, 0, 255)
+                alert_detail = "Driver Distracted"
+                severity = "Medium"
             
-            if should_log_distraction:
+            if should_log_distraction and distraction_info:
                 log.warning(f"Logging distraction: {reason}")
                 self.logger.alert("distraction")
-                self.logger.log_event(self.user.user_id, f"DISTRACTION_{reason}", 2.5, 0.0, frame)
+                self.logger.log_event(
+                    self.user.user_id, 
+                    f"DISTRACTION_{reason}", 
+                    distraction_info.get('duration', 2.5),
+                    0.0,
+                    frame,
+                    alert_category="Distraction",
+                    alert_detail=distraction_info.get('alert_detail', alert_detail),
+                    severity=distraction_info.get('severity', severity)
+                )
         
+        # Priority 4: Normal
+        else:
+            final_status = "NORMAL"
+            final_color = (0, 255, 0)
         
         user_label = f"User {self.user.user_id}" if self.user else "User ?"
         self.visualizer.draw_detection_hud(display, user_label, final_status, final_color, fps, avg_ear, mar, 0, expr, (pitch, yaw, roll))
@@ -290,8 +325,6 @@ class DetectionLoop:
 
         result_threshold = self.ear_calibrator.calibrate()
         
-        
-        # Ensure any calibration windows are closed
         try:
             cv2.destroyWindow("Calibration")
         except:
@@ -320,7 +353,5 @@ class DetectionLoop:
             log.warning("Calibration failed.")
             self.current_mode = 'WAITING_FOR_USER'
 
-        # Reset patience and add a cooldown to avoid immediate recalibration
         self.recognition_patience = 0
-        self._post_calibration_cooldown = getattr(self, "_post_calibration_cooldown", 0)
-        self._post_calibration_cooldown = 45  # ~1.5s at 30 FPS
+        self._post_calibration_cooldown = 45

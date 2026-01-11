@@ -34,6 +34,10 @@ class DrowsinessDetector:
         self.states = {'IS_DROWSY': False, 'IS_YAWNING': False, 'EYES_CLOSED': False}
         self.episode = {'active': False, 'start_time': None, 'min_ear': 1.0, 'start_frame': None}
 
+        # Yawn frequency tracking
+        self.yawn_timestamps = deque(maxlen=10)  # Track last 10 yawns
+        self.yawn_count = 0
+        
         logging.info("DrowsinessDetector initialized (Clean, no fainting)")
 
     def _load_config(self, path_str):
@@ -128,12 +132,26 @@ class DrowsinessDetector:
                 if self.counters['RECOVERY'] >= self.config['drowsy_end']:
                     dur = time.time() - self.episode['start_time']
                     if dur >= self.config['min_episode_sec']:
+                        # Determine severity
+                        if dur >= 5.0:
+                            severity = "Critical"
+                        elif dur >= 3.0:
+                            severity = "High"
+                        elif dur >= 2.0:
+                            severity = "Medium"
+                        else:
+                            severity = "Low"
+                        
+                        # Updated call - removed technical fields
                         self.logger.log_event(
                             getattr(self.user, 'user_id', 0),
-                            "DROWSINESS_EPISODE",
+                            "DROWSY",
                             dur,
-                            self.episode['min_ear'],
-                            self.episode['start_frame']
+                            self.episode['min_ear'],  # Store EAR in 'value' field
+                            self.episode['start_frame'],
+                            alert_category="Drowsiness",
+                            alert_detail="Eyes Closed Too Long",
+                            severity=severity
                         )
                     self.episode['active'] = False
                     self.counters['DROWSINESS'] = 0
@@ -150,9 +168,11 @@ class DrowsinessDetector:
         self.states['IS_DROWSY'] = self.episode['active']
 
     def _update_blink(self, ear):
+        """Track blinks for statistics."""
         if ear < self.dynamic_ear_thresh:
             self.counters['EYES_CLOSED'] += 1
         else:
+            # Valid blink: eyes closed for 1-10 frames
             if 0 < self.counters['EYES_CLOSED'] < 10:
                 self.counters['BLINK'] += 1
             self.counters['EYES_CLOSED'] = 0
@@ -177,12 +197,36 @@ class DrowsinessDetector:
 
         if self.counters['YAWN'] >= self.config['yawn_thresh']:
             if not self.states['IS_YAWNING']:
+                now = time.time()
+                self.yawn_timestamps.append(now)
+                self.yawn_count += 1
+                
+                # Determine severity based on yawn frequency
+                # High: 3+ yawns in last 2 minutes
+                recent_yawns = sum(1 for t in self.yawn_timestamps if now - t < 120)
+                
+                if recent_yawns >= 3:
+                    severity = "High"
+                    alert_detail = f"Frequent Yawning ({recent_yawns} in 2 min)"
+                    if covered:
+                        alert_detail += " with Hand Near Face"
+                elif covered:
+                    severity = "Medium"
+                    alert_detail = "Yawning with Hand Near Face"
+                else:
+                    severity = "Low"
+                    alert_detail = "Yawning"
+                
+                # Updated call with dynamic severity
                 self.logger.log_event(
                     getattr(self.user, 'user_id', 0),
-                    "YAWN_COVERED" if covered else "YAWN",
+                    "YAWN",
                     0.0,
-                    mar,
-                    self._last_frame_rgb
+                    mar,  # Store MAR in 'value' field
+                    self._last_frame_rgb,
+                    alert_category="Drowsiness",
+                    alert_detail=alert_detail,
+                    severity=severity
                 )
                 self.counters['YAWN_COOL'] = self.config['yawn_cool']
                 self.states['IS_YAWNING'] = True
@@ -191,5 +235,7 @@ class DrowsinessDetector:
         return {
             'is_drowsy': self.states['IS_DROWSY'],
             'is_yawning': self.states['IS_YAWNING'],
+            'eyes_closed': self.states['EYES_CLOSED'],
+            'blink_count': self.counters['BLINK'],
             'ear_trend': "STABLE"
         }
