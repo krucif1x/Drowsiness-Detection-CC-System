@@ -1,68 +1,73 @@
-# Drowsiness Detector Configuration
-# All time-based thresholds in SECONDS (converted to frames at runtime)
+# Detector Configuration
+# All time-based thresholds are in SECONDS unless explicitly noted as FRAMES.
 
-# System Settings
 system:
   vin: "VIN-0001"
   target_fps: 30.0
 
-# Episode Detection
-drowsiness:
-  start_threshold_sec: 0.5        # Time of low EAR to START episode
-  end_grace_sec: 1.5              # Time of normal EAR to END episode
-  min_episode_sec: 2.0            # Minimum episode duration to log
-  time_threshold: 2.0             # Duration before logging drowsy event (NEW)
-  ear_low_threshold: 0.22         # Eyes considered closed (NEW)
-  ear_high_threshold: 0.26        # Eyes considered open (NEW)
-  ear_drop_threshold: 0.10        # Sudden drop size (NEW)
-  
-# Blink Detection
-blink:
-  closed_frames: 2                # Frames with eyes closed = 1 blink
-
-# Yawn Detection
-yawn:
-  threshold_sec: 0.27             # Time with mouth open to detect yawn
-  cooldown_sec: 2.0               # Cooldown before next yawn can be logged
-  mar_threshold: 0.55             # MAR value to trigger yawn detection (NEW)
-
-# Expression Suppression (prevent false drowsiness during smiles/laughs)
-expression:
-  smile_suppress_sec: 0.5         # Suppress drowsiness after smile
-  laugh_suppress_sec: 0.67        # Suppress drowsiness after laugh
-
-# User Recognition
+# Non-detector sections (kept here because other modules may rely on them)
 user:
-  swap_threshold: 0.8             # Face encoding distance for user swap
+  swap_threshold: 0.8
 
-# Image Quality
 image:
-  local_quality: 85               # JPEG quality for local SQLite (0-100)
-  remote_quality: 70              # JPEG quality for remote server (0-100)
+  local_quality: 85
+  remote_quality: 70
 
-# Distraction Detection
-distraction:
-  yaw_threshold: 45.0             # Looking side threshold
-  pitch_down_threshold: 20.0      # Looking down threshold
-  pitch_up_threshold: 20.0        # Looking up threshold
-  time_hands_visible: 1.5         # Seconds before alert
-  time_gaze: 1.2                  # Seconds before alert
+# Detector-scoped configuration (source of truth for detector thresholds/behavior)
+detectors:
+  drowsiness:
+    episode:
+      start_threshold_sec: 0.5
+      end_grace_sec: 1.5
+      min_episode_sec: 2.0
 
-# Fainting Detection
-fainting:
-  pitch_extreme: 45.0             # deg above camera pitch
-  rapid_change: 12.0              # deg over history window
-  history_sec: 0.6                # seconds for pitch/face trend
-  history_frames: 30              # frames for history buffer (NEW)
-  vis_window_sec: 0.6             # seconds for visibility smoothing
-  face_slump_trend_min: 0.006     # downward slope threshold
-  min_confirm_sec: 1.0            # require sustained indicators
-  min_confirm_frames: 36          # require sustained frames (NEW)
-  phone_pitch_min: 18.0
-  phone_pitch_max: 38.0
-  var_stable_max: 5.0             # variance threshold for stable phone posture
-  var_unstable_min: 10.0
-  vis_face_thr: 0.40              # min face visibility to count as visible
-  vis_sh_thr: 0.35                # min shoulder visibility
-  prob_threshold: 0.75            # final probability to declare fainting
-  phone_demote: 0.4               # phone posture demotion (NEW)
+    ear:
+      low_threshold: 0.22
+      high_threshold: 0.26
+      drop_threshold: 0.10
+      drop_window_frames: 15
+      history_sec: 1.0
+
+    blink:
+      min_closed_frames: 1
+      max_closed_frames: 10
+
+    yawn:
+      threshold_sec: 0.27
+      cooldown_sec: 2.0
+      hand_cover_distance_norm: 0.15
+      frequency_window_sec: 120
+      high_frequency_count: 3
+      timestamps_max: 10
+
+    expression_suppression:
+      smile_suppress_sec: 0.5
+      laugh_suppress_sec: 0.67
+
+    severity:
+      drowsiness:
+        medium_sec: 2.0
+        high_sec: 3.0
+        critical_sec: 5.0
+
+  distraction:
+    thresholds:
+      yaw_deg: 45.0
+      pitch_down_deg: 20.0
+      pitch_up_deg: 20.0
+
+    timing:
+      hands_visible_sec: 1.5
+      gaze_sec: 1.2
+
+    smoothing:
+      history_frames: 5
+      required_frames: 3
+      face_visibility_history_frames: 10
+      face_present_min_samples: 5
+      partial_face_threshold: 0.4
+
+    severity:
+      long_duration_high_sec: 3.0
+
+  

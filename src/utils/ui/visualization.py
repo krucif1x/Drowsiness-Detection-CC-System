@@ -98,3 +98,14 @@ class Visualizer:
         h, w = display.shape[:2]
         cv2.putText(display, "NO FACE DETECTED", (w//2 - 100, h//2),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+    
+    def draw_mode(self, display, mode: str):
+        cv2.putText(
+            display,
+            f"MODE: {mode}",
+            (10, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            1,
+        )

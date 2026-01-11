@@ -1,10 +1,10 @@
 import time
 import logging
-import yaml
 import math
 import numpy as np
 from collections import deque
 from src.services.system_logger import SystemLogger
+from src.utils.load_detector_config import load_yaml_section
 
 class DrowsinessDetector:
     """
@@ -20,11 +20,13 @@ class DrowsinessDetector:
 
         # State Tracking
         self._last_frame_rgb = None
-        self.ear_history = deque(maxlen=int(1.0 * fps))  # 1 second buffer
+
+        # Use YAML-driven history length (seconds -> frames)
+        self.ear_history = deque(maxlen=int(self.config["ear_history_frames"]))
         self.ear_drop_detected = False
 
         # Dynamic EAR thresholds (loaded from user profile or config)
-        self.dynamic_ear_thresh = self.config['ear_low']
+        self.dynamic_ear_thresh = self.config["ear_low"]
 
         self.counters = {
             'DROWSINESS': 0, 'RECOVERY': 0, 'YAW': 0, 'YAW_COOL': 0,
@@ -40,32 +42,88 @@ class DrowsinessDetector:
         
         logging.info("DrowsinessDetector initialized (Clean, no fainting)")
 
-    def _load_config(self, path_str):
-        default = {
-            'drowsy_start': int(0.8 * self.fps), 'drowsy_end': int(1.5 * self.fps),
-            'min_episode_sec': 2.0, 'ear_low': 0.22, 'ear_high': 0.26, 'ear_drop': 0.10,
-            'yawn_thresh': int(0.4 * self.fps), 'yawn_cool': int(3.0 * self.fps),
-            'smile_sup': int(0.5 * self.fps), 'laugh_sup': int(1.0 * self.fps)
+    def _load_config(self, path_str: str):
+        # Defaults (fallback only)
+        defaults = {
+            "episode": {
+                "start_threshold_sec": 0.5,
+                "end_grace_sec": 1.5,
+                "min_episode_sec": 2.0,
+            },
+            "ear": {
+                "low_threshold": 0.22,
+                "high_threshold": 0.26,
+                "drop_threshold": 0.10,
+                "drop_window_frames": 15,
+                "history_sec": 1.0,
+            },
+            "blink": {"min_closed_frames": 1, "max_closed_frames": 10},
+            "yawn": {
+                "threshold_sec": 0.27,
+                "cooldown_sec": 2.0,
+                "hand_cover_distance_norm": 0.15,
+                "frequency_window_sec": 120.0,
+                "high_frequency_count": 3,
+                "timestamps_max": 10,
+            },
+            "expression_suppression": {"smile_suppress_sec": 0.5, "laugh_suppress_sec": 0.67},
+            "severity": {"drowsiness": {"medium_sec": 2.0, "high_sec": 3.0, "critical_sec": 5.0}},
         }
-        try:
-            with open(path_str, 'r') as f:
-                raw = yaml.safe_load(f) or {}
-                d, y, e = raw.get('drowsiness', {}), raw.get('yawn', {}), raw.get('expression', {})
-                return {
-                    'drowsy_start': int(d.get('start_threshold_sec', 0.8) * self.fps),
-                    'drowsy_end': int(d.get('end_grace_sec', 1.5) * self.fps),
-                    'min_episode_sec': d.get('min_episode_sec', 2.0),
-                    'ear_low': d.get('ear_low_threshold', 0.22),
-                    'ear_high': d.get('ear_high_threshold', 0.26),
-                    'ear_drop': d.get('ear_drop_threshold', 0.10),
-                    'yawn_thresh': int(y.get('threshold_sec', 0.4) * self.fps),
-                    'yawn_cool': int(y.get('cooldown_sec', 3.0) * self.fps),
-                    'smile_sup': int(e.get('smile_suppress_sec', 0.5) * self.fps),
-                    'laugh_sup': int(e.get('laugh_suppress_sec', 1.0) * self.fps),
-                }
-        except Exception as e:
-            logging.warning(f"Config load error: {e}. Using defaults.")
-            return default
+
+        root = load_yaml_section(path_str, "detectors.drowsiness")
+
+        episode = root.get("episode", {}) if isinstance(root.get("episode", {}), dict) else {}
+        ear = root.get("ear", {}) if isinstance(root.get("ear", {}), dict) else {}
+        blink = root.get("blink", {}) if isinstance(root.get("blink", {}), dict) else {}
+        yawn = root.get("yawn", {}) if isinstance(root.get("yawn", {}), dict) else {}
+        sup = root.get("expression_suppression", {}) if isinstance(root.get("expression_suppression", {}), dict) else {}
+        sev_root = root.get("severity", {}) if isinstance(root.get("severity", {}), dict) else {}
+        sev = sev_root.get("drowsiness", {}) if isinstance(sev_root.get("drowsiness", {}), dict) else {}
+
+        start_sec = float(episode.get("start_threshold_sec", defaults["episode"]["start_threshold_sec"]))
+        end_sec = float(episode.get("end_grace_sec", defaults["episode"]["end_grace_sec"]))
+        history_sec = float(ear.get("history_sec", defaults["ear"]["history_sec"]))
+
+        return {
+            # episode
+            "drowsy_start": int(start_sec * self.fps),
+            "drowsy_end": int(end_sec * self.fps),
+            "min_episode_sec": float(episode.get("min_episode_sec", defaults["episode"]["min_episode_sec"])),
+
+            # ear
+            "ear_low": float(ear.get("low_threshold", defaults["ear"]["low_threshold"])),
+            "ear_high": float(ear.get("high_threshold", defaults["ear"]["high_threshold"])),
+            "ear_drop": float(ear.get("drop_threshold", defaults["ear"]["drop_threshold"])),
+            "ear_drop_window_frames": int(ear.get("drop_window_frames", defaults["ear"]["drop_window_frames"])),
+            "ear_history_frames": max(1, int(history_sec * self.fps)),
+
+            # blink
+            "blink_min_closed_frames": int(blink.get("min_closed_frames", defaults["blink"]["min_closed_frames"])),
+            "blink_max_closed_frames": int(blink.get("max_closed_frames", defaults["blink"]["max_closed_frames"])),
+
+            # yawn
+            "yawn_thresh": int(float(yawn.get("threshold_sec", defaults["yawn"]["threshold_sec"])) * self.fps),
+            "yawn_cool": int(float(yawn.get("cooldown_sec", defaults["yawn"]["cooldown_sec"])) * self.fps),
+            "hand_cover_distance_norm": float(
+                yawn.get("hand_cover_distance_norm", defaults["yawn"]["hand_cover_distance_norm"])
+            ),
+            "yawn_frequency_window_sec": float(
+                yawn.get("frequency_window_sec", defaults["yawn"]["frequency_window_sec"])
+            ),
+            "yawn_high_frequency_count": int(
+                yawn.get("high_frequency_count", defaults["yawn"]["high_frequency_count"])
+            ),
+            "yawn_timestamps_max": int(yawn.get("timestamps_max", defaults["yawn"]["timestamps_max"])),
+
+            # expression suppression
+            "smile_sup": int(float(sup.get("smile_suppress_sec", defaults["expression_suppression"]["smile_suppress_sec"])) * self.fps),
+            "laugh_sup": int(float(sup.get("laugh_suppress_sec", defaults["expression_suppression"]["laugh_suppress_sec"])) * self.fps),
+
+            # severity
+            "sev_medium_sec": float(sev.get("medium_sec", defaults["severity"]["drowsiness"]["medium_sec"])),
+            "sev_high_sec": float(sev.get("high_sec", defaults["severity"]["drowsiness"]["high_sec"])),
+            "sev_critical_sec": float(sev.get("critical_sec", defaults["severity"]["drowsiness"]["critical_sec"])),
+        }
 
     def set_last_frame(self, frame):
         self._last_frame_rgb = frame.copy() if frame is not None else None

@@ -61,33 +61,45 @@ class MouthExpressionClassifier:
         if not hands_data or img_w <= 0 or img_h <= 0:
             return False
 
-        # Mouth center (lip corners)
-        lc = landmarks_px[M_MAR[0]]  # left corner
-        rc = landmarks_px[M_MAR[3]]  # right corner
+        # Mouth center (lip corners) in px
+        lc = landmarks_px[M_MAR[0]]
+        rc = landmarks_px[M_MAR[3]]
         mx_px = 0.5 * (lc[0] + rc[0])
         my_px = 0.5 * (lc[1] + rc[1])
 
         # Normalize mouth center to compare with hands (0..1)
-        mx = mx_px / max(1.0, img_w)
-        my = my_px / max(1.0, img_h)
+        mx = mx_px / float(img_w)
+        my = my_px / float(img_h)
 
-        # Check a couple of fingertip landmarks
+        prox_sq = float(self.HAND_MOUTH_PROX) ** 2
+
         for hand in hands_data:
-            # Middle tip (12) and Index tip (8) typical of touching mouth
+            if not hand:
+                continue
+            # Middle tip (12) and Index tip (8)
             for idx in (12, 8):
+                if idx >= len(hand):
+                    continue
+                pt = hand[idx]
                 try:
-                    fx, fy, _ = hand[idx]
+                    fx = float(pt[0])
+                    fy = float(pt[1])
                 except Exception:
                     continue
-                if math.hypot(fx - mx, fy - my) < self.HAND_MOUTH_PROX:
+
+                dx = fx - mx
+                dy = fy - my
+                if (dx * dx + dy * dy) < prox_sq:
                     return True
+
         return False
 
-    def classify(self, landmarks: List[Tuple[int, int]], img_h: int, hands_data: list = None) -> str:
+    def classify(self, landmarks: List[Tuple[int, int]], img_h: int, hands_data: list = None, img_w: int = None) -> str:
         """
         landmarks: face landmarks in pixel coordinates
-        img_h: image height (pixels); used only for a quick normalization helper
-        hands_data: list of hands; each hand is a list of normalized (x,y,z) landmarks
+        img_h: image height (pixels)
+        img_w: image width (pixels) (optional; strongly recommended)
+        hands_data: list of hands; each hand is a list of normalized (x,y[,z]) landmarks
         """
         # Quick guards
         if not landmarks or len(landmarks) <= max(M_MAR):
@@ -108,7 +120,6 @@ class MouthExpressionClassifier:
         if self._neutral_width is None:
             self._neutral_width = max(width, 1.0)
         elif self._frame_count <= 30:
-            # small running max helps avoid very small initial widths
             self._neutral_width = max(self._neutral_width, width)
 
         width_ratio = width / max(self._neutral_width, 1.0)
@@ -118,11 +129,9 @@ class MouthExpressionClassifier:
         self._ema_mar = (1 - alpha) * self._ema_mar + alpha * mar
         self._ema_width_ratio = (1 - alpha) * self._ema_width_ratio + alpha * width_ratio
 
-        # Hand occlusion check (use image width for x, height for y; we only have img_h but can infer an aspect)
-        # We do a robust check using mouth center normalized against rough image size.
-        # If you can pass img_w too, replace img_w_guess below.
-        img_w_guess = img_h  # assume near-square FOV; safe default
-        if self._hand_obscures_mouth(landmarks, img_w_guess, img_h, hands_data):
+        # Use real img_w if provided; fall back to previous behavior
+        img_w_eff = int(img_w) if img_w else img_h
+        if self._hand_obscures_mouth(landmarks, img_w_eff, img_h, hands_data):
             self._history.append("OBSCURED")
             return self._stable_label()
 
