@@ -6,9 +6,9 @@ import cv2
 
 from src.calibration.main_logic import EARCalibrator
 from src.core.status_aggregator import StatusAggregator
-from src.detectors.distraction import DistractionDetector
-from src.detectors.drowsiness import DrowsinessDetector
-from src.detectors.expression import MouthExpressionClassifier
+from src.status.distraction.detector import DistractionDetector
+from src.status.drowsiness.detector import DrowsinessDetector
+from src.status.expression import MouthExpressionClassifier
 from src.mediapipe.hand import MediaPipeHandsWrapper
 from src.mediapipe.head_pose import HeadPoseEstimator
 from src.utils.constants import L_EAR, M_MAR, R_EAR
