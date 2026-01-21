@@ -5,7 +5,6 @@ import os
 import numpy as np
 from pathlib import Path
 from src.infrastructure.hardware.camera import Camera
-from src.infrastructure.hardware.buzzer import Buzzer
 from src.services.user_manager import UserManager
 from src.services.remote_logger import RemoteLogWorker
 from src.services.system_logger import SystemLogger
@@ -32,18 +31,17 @@ class DrowsinessSystem:
             self._init_resources()
             log.info(f"System Ready. VIN: {self.vin}")
             print("\n>>> PRESS 'Q' TO EXIT <<<\n")
-            
+
             DetectionLoop(
-                camera=self.camera, 
-                face_mesh=self.face_mesh, 
-                buzzer=self.buzzer, 
-                user_manager=self.user_manager, 
-                system_logger=self.system_logger, 
-                vehicle_vin=self.vin, 
-                fps=self.fps, 
-                detector_config_path=self.CONFIG_PATH
+                camera=self.camera,
+                face_mesh=self.face_mesh,
+                user_manager=self.user_manager,
+                system_logger=self.system_logger,
+                vehicle_vin=self.vin,
+                fps=self.fps,
+                detector_config_path=self.CONFIG_PATH,
             ).run()
-            
+
         except KeyboardInterrupt:
             log.info("User requested shutdown.")
         except Exception as e:
@@ -55,25 +53,17 @@ class DrowsinessSystem:
         # 1. Unified Database & Repository
         self.db = UnifiedDatabase(self.DB_PATH)
         self.repo = UnifiedRepository(self.db)
-        
+
         # 2. Services
         self.user_manager = UserManager(database_file=self.DB_PATH)
         self.remote_worker = RemoteLogWorker(self.DB_PATH, os.getenv("DS_REMOTE_URL"), True)
-        self.buzzer = Buzzer(pin=18)
-        self.system_logger = SystemLogger(self.buzzer, self.remote_worker, self.repo, self.vin)
-        
-        # Notify system logger about startup
-        try:
-            if hasattr(self, "system_logger") and self.system_logger:
-                self.system_logger.signal("startup")
-        except Exception:
-            pass
-            
+        self.system_logger = SystemLogger(self.remote_worker, self.repo, self.vin)
+
         # 3. Hardware
         self.camera = Camera(source='auto', resolution=(640, 480))
         if not self.camera.ready:
             raise RuntimeError("Camera failed to open")
-            
+
         # 4. AI Model (Warmup with generated black frame)
         self.face_mesh = MediaPipeFaceModel(max_num_faces=1, refine_landmarks=True)
         dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -83,7 +73,6 @@ class DrowsinessSystem:
         log.info("Shutting down...")
         if hasattr(self, 'remote_worker') and self.remote_worker: self.remote_worker.close()
         if hasattr(self, 'db') and self.db: self.db.close()
-        if hasattr(self, 'buzzer') and self.buzzer: self.buzzer.off()
         if hasattr(self, 'camera') and self.camera: self.camera.release()
         if hasattr(self, 'face_mesh') and self.face_mesh: self.face_mesh.close()
         cv2.destroyAllWindows()
@@ -94,5 +83,6 @@ class DrowsinessSystem:
 
     def _load_config(self):
         if Path(self.CONFIG_PATH).exists():
-             with open(self.CONFIG_PATH) as f: return yaml.safe_load(f)
+            with open(self.CONFIG_PATH) as f:
+                return yaml.safe_load(f)
         return {}

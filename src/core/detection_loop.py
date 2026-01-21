@@ -19,6 +19,7 @@ from src.utils.ui.visualization import Visualizer
 from src.utils.calibration.calculation import MAR
 
 from src.core.frame_processing import FrameProcessor, HandsPipeline
+from src.infrastructure.hardware.buzzer import Buzzer  # <-- buzzer lives here now
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +29,6 @@ class DetectionLoop:
         self,
         camera,
         face_mesh,
-        buzzer,
         user_manager,
         system_logger,
         vehicle_vin,
@@ -41,6 +41,10 @@ class DetectionLoop:
         self.face_mesh = face_mesh
         self.user_manager = user_manager
         self.logger = system_logger
+
+        # Buzzer is owned/used ONLY by DetectionLoop
+        buzzer_pin = int(os.getenv("DS_BUZZER_PIN", "17"))
+        self.buzzer = Buzzer(pin=buzzer_pin)
 
         # Headless mode (for systemd / no DISPLAY)
         # Enable with: DS_HEADLESS=1
@@ -57,6 +61,8 @@ class DetectionLoop:
         self._post_calibration_cooldown = 0
         self._identity_prompted = False
         self._event_beep_cooldown = 0
+        self._last_is_drowsy = False
+        self._last_is_distracted = False
 
         # Identity prompt control + event cooldown (prevents buzzing every frame)
         self.detector = DrowsinessDetector(self.logger, fps, detector_config_path)
@@ -107,6 +113,20 @@ class DetectionLoop:
     def _request_stop(self, *_args):
         self._stop_requested = True
 
+    def _buzz_drowsy(self, fps: float):
+        # Distinct: longer / stronger
+        if not self.buzzer:
+            return
+        self.buzzer.beep_for(on_time=0.30, off_time=0.10, duration_sec=2.5)
+        self._event_beep_cooldown = int(max(1, fps * 2))  # rate limit
+
+    def _buzz_distraction(self, fps: float):
+        # Distinct: shorter / faster
+        if not self.buzzer:
+            return
+        self.buzzer.beep_for(on_time=0.10, off_time=0.10, duration_sec=1.6)
+        self._event_beep_cooldown = int(max(1, fps * 2))  # rate limit
+
     def run(self):
         log.info("Starting Detection Loop...")
 
@@ -133,16 +153,16 @@ class DetectionLoop:
                     time.sleep(0.001)
         finally:
             try:
-                self.hand_wrapper.close()
+                self.buzzer.off()
             except Exception:
                 pass
             try:
-                if hasattr(self.logger, "stop_alert"):
-                    self.logger.stop_alert()
+                self.hand_wrapper.close()
             except Exception:
                 pass
 
-            # Only touch HighGUI in non-headless
+            # Removed: self.logger.stop_alert() (buzzer is owned by DetectionLoop only)
+
             if not self.headless:
                 try:
                     cv2.destroyAllWindows()
@@ -159,11 +179,6 @@ class DetectionLoop:
 
         # One-time identity prompt beep (safe if buzzer absent)
         if self.current_mode == "WAITING_FOR_USER" and not self._identity_prompted:
-            try:
-                if hasattr(self.logger, "signal"):
-                    self.logger.signal("identity_prompt")
-            except Exception:
-                pass
             self._identity_prompted = True
         if self.current_mode == "DETECTING":
             self._identity_prompted = False
@@ -261,22 +276,27 @@ class DetectionLoop:
             distraction_info=out["distraction_info"],
         )
 
-        # Buzzer on DROWSY state (rate-limited)
-        if out.get("is_drowsy") and self._event_beep_cooldown == 0:
-            try:
-                if hasattr(self.logger, "signal"):
-                    self.logger.signal("drowsy")
-            except Exception:
-                pass
-            self._event_beep_cooldown = int(max(1, fps * 2))
+        now_drowsy = bool(out.get("is_drowsy", False))
+        # Use "is_distracted" for immediate buzzer (not only when logging triggers)
+        now_distracted = bool(out.get("is_distracted", False))
 
+        # Prefer drowsy buzzer over distraction if both happen
+        if now_drowsy:
+            should_buzz = (not self._last_is_drowsy) or (self._event_beep_cooldown == 0)
+            if should_buzz:
+                log.debug("Buzzer: drowsy (cooldown=%s)", self._event_beep_cooldown)
+                self._buzz_drowsy(fps)
+        elif now_distracted:
+            should_buzz = (not self._last_is_distracted) or (self._event_beep_cooldown == 0)
+            if should_buzz:
+                log.debug("Buzzer: distracted (cooldown=%s)", self._event_beep_cooldown)
+                self._buzz_distraction(fps)
+
+        self._last_is_drowsy = now_drowsy
+        self._last_is_distracted = now_distracted
+
+        # Logging remains in SystemLogger (DB/remote) only
         if final.should_log_distraction:
-            try:
-                if hasattr(self.logger, "signal"):
-                    self.logger.signal("distraction")
-            except Exception:
-                pass
-
             user_id = getattr(self.user, "user_id", 0)
             self.logger.log_event(
                 user_id,
@@ -335,9 +355,10 @@ class DetectionLoop:
 
     def calibration(self, frame):
         log.info("Starting Calibration...")
+
+        # Stop any ongoing buzzer output before calibration UI
         try:
-            if hasattr(self.logger, "stop_alert"):
-                self.logger.stop_alert()
+            self.buzzer.off()
         except Exception:
             pass
 
