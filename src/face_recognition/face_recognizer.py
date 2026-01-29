@@ -1,217 +1,117 @@
-import logging
-import time
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Dict, Optional, Tuple, Union
-from collections import deque
+from __future__ import annotations
 
-import cv2
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import torch
-import torch.nn.functional as F
-from facenet_pytorch import MTCNN, InceptionResnetV1
 from PIL import Image
+from facenet_pytorch import MTCNN, InceptionResnetV1
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
-class FaceEncodingMetadata:
-    detection_prob: float = 0.0
-    num_faces_detected: int = 0
-    extraction_time_ms: float = 0.0
-    face_selected_index: int = -1
+class ExtractMetadata:
+    detected: bool
+    prob: float | None
+    faces_detected: int
+    reason: str | None = None
 
 
 class FaceRecognizer:
     """
-    Single-responsibility component: given a frame, return a normalized 512-dim face encoding.
+    Face encoding extractor using:
+      - MTCNN for detection + aligned crop
+      - InceptionResnetV1 (vggface2) for 512-d embeddings
 
-    Encapsulates:
-      - preprocess/validation (RGB/BGR normalization)
-      - model loading (MTCNN + InceptionResnetV1)
-      - face detection + best-face selection
-      - embedding extraction + normalization
+    Returns a L2-normalized 512-d embedding (np.float32).
     """
 
     def __init__(
         self,
-        device: Optional[torch.device] = None,
+        device: torch.device,
         input_color: str = "RGB",
         min_detection_prob: float = 0.95,
-        keep_all: bool = True,
         image_size: int = 160,
-        margin: int = 40,
-        detector_max_side: int = 320,  # NEW (perf): downscale for detection
+        margin: int = 14,
+        keep_all: bool = False,  # was True (faster for single face)
     ):
-        self.device = device or torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.input_color = (input_color or "RGB").upper()
         self.min_detection_prob = float(min_detection_prob)
 
-        self._keep_all = bool(keep_all)
-        self._image_size = int(image_size)
-        self._margin = int(margin)
-        self.detector_max_side = int(detector_max_side)
-
-        self._mtcnn: Optional[MTCNN] = None
-        self._resnet: Optional[InceptionResnetV1] = None
-
-        self._stats = {
-            "total_extractions": 0,
-            "successful_extractions": 0,
-            "failed_no_face": 0,
-            "failed_low_confidence": 0,
-            "failed_preprocessing": 0,
-            "avg_extraction_time_ms": deque(maxlen=500),  
-        }
-
-        logging.info(
-            "FaceRecognizer initialized: device=%s input_color=%s min_prob=%.2f",
-            str(self.device),
-            self.input_color,
-            self.min_detection_prob,
+        self.mtcnn = MTCNN(
+            image_size=image_size,
+            margin=margin,
+            keep_all=keep_all,
+            post_process=True,
+            device=self.device,
+            select_largest=True,
         )
+        self.resnet = InceptionResnetV1(pretrained="vggface2").eval().to(self.device)
 
-    @property
-    def mtcnn(self) -> MTCNN:
-        if self._mtcnn is None:
-            logging.info("Loading MTCNN...")
-            self._mtcnn = MTCNN(
-                keep_all=self._keep_all,
-                image_size=self._image_size,
-                margin=self._margin,
-                device=self.device,
-                post_process=False,
-            )
-        return self._mtcnn
+    def _to_pil_rgb(self, frame: Any) -> Image.Image:
+        """
+        Accepts numpy frame (H,W,3) or PIL image and returns PIL RGB.
+        """
+        if isinstance(frame, Image.Image):
+            return frame.convert("RGB")
 
-    @property
-    def resnet(self) -> InceptionResnetV1:
-        if self._resnet is None:
-            logging.info("Loading InceptionResnetV1...")
-            self._resnet = InceptionResnetV1(pretrained="vggface2").eval().to(self.device)
-            for p in self._resnet.parameters():
-                p.requires_grad = False
-        return self._resnet
+        arr = np.asarray(frame)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            raise ValueError("Expected HxWx3 image array")
 
-    @lru_cache(maxsize=128)
-    def _shape_ok(self, shape: tuple, dtype_str: str) -> bool:
-        return len(shape) == 3 and shape[2] == 3
+        arr = arr[:, :, :3]
 
-    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        if not isinstance(frame, np.ndarray):
-            raise ValueError("Frame must be np.ndarray")
-
-        if frame.dtype != np.uint8:
-            frame = np.clip(frame, 0, 255).astype(np.uint8)
-
-        if not self._shape_ok(frame.shape, str(frame.dtype)):
-            raise ValueError(f"Invalid image shape: {frame.shape}")
-
+        # OpenCV frames are commonly BGR; convert if needed
         if self.input_color == "BGR":
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            arr = arr[:, :, ::-1]
 
-        # PERF: downscale large frames for MTCNN
-        h, w = frame.shape[:2]
-        max_side = max(h, w)
-        if self.detector_max_side > 0 and max_side > self.detector_max_side:
-            scale = self.detector_max_side / float(max_side)
-            new_w = max(1, int(w * scale))
-            new_h = max(1, int(h * scale))
-            frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return Image.fromarray(arr.astype(np.uint8), mode="RGB")
 
-        return frame
-
-    def extract(self, frame: Any, return_metadata: bool = False) -> Union[Optional[np.ndarray], Tuple[Optional[np.ndarray], Dict[str, Any]]]:
-        t0 = time.time()
-        self._stats["total_extractions"] += 1
-
-        md = FaceEncodingMetadata()
-        metadata_dict: Dict[str, Any] = {
-            "detection_prob": md.detection_prob,
-            "num_faces_detected": md.num_faces_detected,
-            "extraction_time_ms": md.extraction_time_ms,
-            "face_selected_index": md.face_selected_index,
-        }
-
+    @torch.inference_mode()
+    def extract(self, image_frame: Any, return_metadata: bool = False) -> Optional[np.ndarray] | Tuple[Optional[np.ndarray], Dict]:
         try:
-            frame = self._preprocess(frame)
-        except ValueError as e:
-            logging.debug("Preprocessing failed: %s", e)
-            self._stats["failed_preprocessing"] += 1
-            return (None, metadata_dict) if return_metadata else None
+            img = self._to_pil_rgb(image_frame)
+        except Exception as e:
+            md = ExtractMetadata(False, None, 0, reason=f"bad_input:{e}")
+            return (None, md.__dict__) if return_metadata else None
 
-        pil_frame = Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame
+        # SINGLE pass: get aligned face crops + detection probabilities
+        faces, probs = self.mtcnn(img, return_prob=True)
 
-        try:
-            faces, probs = self.mtcnn(pil_frame, return_prob=True)
-        except TypeError:
-            res = self.mtcnn(pil_frame)
-            faces, probs = (res, None) if res is not None else (None, None)
+        if faces is None or probs is None:
+            md = ExtractMetadata(False, None, 0, reason="no_face")
+            return (None, md.__dict__) if return_metadata else None
 
-        if faces is None or not isinstance(faces, torch.Tensor):
-            self._stats["failed_no_face"] += 1
-            return (None, metadata_dict) if return_metadata else None
+        # Normalize shapes for keep_all=True/False
+        if isinstance(probs, float):
+            probs_list = [float(probs)]
+            faces_list = [faces]  # Tensor (3,H,W)
+        else:
+            probs_list = [float(p) for p in probs]
+            faces_list = list(faces)  # list of (3,H,W)
 
-        if faces.ndim == 3:
-            faces = faces.unsqueeze(0)
+        faces_detected = len(probs_list)
+        good_idxs = [i for i, p in enumerate(probs_list) if p >= self.min_detection_prob]
 
-        if faces.shape[0] == 0:
-            self._stats["failed_no_face"] += 1
-            return (None, metadata_dict) if return_metadata else None
+        if len(good_idxs) == 0:
+            md = ExtractMetadata(False, float(max(probs_list)), faces_detected, reason="low_conf")
+            return (None, md.__dict__) if return_metadata else None
 
-        md.num_faces_detected = int(faces.shape[0])
-        md.face_selected_index = 0
-        md.detection_prob = 1.0
+        # Reject multiple confident faces
+        if len(good_idxs) > 1:
+            md = ExtractMetadata(False, float(max(probs_list)), faces_detected, reason="multi_face")
+            return (None, md.__dict__) if return_metadata else None
 
-        idx = 0
-        if probs is not None and len(probs) == faces.shape[0]:
-            probs_array = np.array(probs, dtype=np.float32).reshape(-1)
-            idx = int(np.argmax(probs_array))
-            md.face_selected_index = idx
-            md.detection_prob = float(probs_array[idx])
+        best_i = good_idxs[0]
+        face_tensor = faces_list[best_i]
 
-            if md.detection_prob < self.min_detection_prob:
-                self._stats["failed_low_confidence"] += 1
-                metadata_dict.update(md.__dict__)
-                return (None, metadata_dict) if return_metadata else None
+        emb = self.resnet(face_tensor.unsqueeze(0).to(self.device)).squeeze(0)
+        emb = emb / (emb.norm(p=2) + 1e-8)
 
-        face = faces[idx].unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            embedding = self.resnet(face)
-            embedding = F.normalize(embedding, p=2, dim=1)
-
-        encoding = embedding.cpu().numpy().flatten()
-
-        if not self.validate_encoding(encoding):
-            metadata_dict.update(md.__dict__)
-            return (None, metadata_dict) if return_metadata else None
-
-        extraction_time_ms = (time.time() - t0) * 1000.0
-        md.extraction_time_ms = extraction_time_ms
-
-        self._stats["successful_extractions"] += 1
-        self._stats["avg_extraction_time_ms"].append(extraction_time_ms)
-
-        metadata_dict.update(md.__dict__)
-        return (encoding, metadata_dict) if return_metadata else encoding
-
-    def validate_encoding(self, encoding: np.ndarray) -> bool:
-        if encoding is None:
-            return False
-        if len(encoding) != 512:
-            logging.warning("Invalid encoding size: %s (expected 512)", len(encoding))
-            return False
-        if np.isnan(encoding).any() or np.isinf(encoding).any():
-            logging.warning("Encoding contains NaN/Inf values")
-            return False
-
-        norm = float(np.linalg.norm(encoding))
-        if norm < 0.5 or norm > 1.5:
-            logging.warning("Encoding norm out of range: %.3f (expected ~1.0)", norm)
-            return False
-
-        if float(np.abs(encoding).max()) > 10.0:
-            logging.warning("Encoding values out of range: max=%.3f", float(np.abs(encoding).max()))
-            return False
-
-        return True
+        out = emb.detach().cpu().numpy().astype(np.float32)
+        md = ExtractMetadata(True, float(probs_list[best_i]), faces_detected, reason=None)
+        return (out, md.__dict__) if return_metadata else out

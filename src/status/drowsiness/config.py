@@ -21,11 +21,17 @@ def load_drowsiness_config(path: str, fps: float) -> Dict[str, Any]:
     ear_high = as_float(ear.get("high_threshold"), 0.26)
     ear_high_ratio = (ear_high / ear_low) if ear_low > 0 else 1.2
 
+    # NEW: perclos section (safe defaults)
+    perclos = get_section(root, "perclos")
+    perclos_window_sec = as_float(perclos.get("window_sec"), 30.0)
+
     return {
         "episode": {
             "start_frames": sec_to_frames(episode.get("start_threshold_sec"), fps, 0.5),
             "end_frames": sec_to_frames(episode.get("end_grace_sec"), fps, 1.5),
             "min_episode_sec": as_float(episode.get("min_episode_sec"), 2.0),
+            # NEW: shorten onset when sudden EAR drop is detected
+            "drop_start_multiplier": as_float(episode.get("drop_start_multiplier"), 0.6),
         },
         "ear": {
             "low": ear_low,
@@ -34,6 +40,12 @@ def load_drowsiness_config(path: str, fps: float) -> Dict[str, Any]:
             "drop": as_float(ear.get("drop_threshold"), 0.10),
             "drop_window_frames": as_int(ear.get("drop_window_frames"), 15),
             "history_frames": sec_to_frames(ear.get("history_sec"), fps, 1.0),
+            # NEW: smoothing for EAR
+            "ema_alpha": as_float(ear.get("ema_alpha"), 0.35),
+        },
+        "perclos": {
+            "window_frames": sec_to_frames(perclos_window_sec, fps, 30.0),
+            "threshold": as_float(perclos.get("threshold"), 0.25),
         },
         "blink": {
             "min_closed_frames": as_int(blink.get("min_closed_frames"), 1),
@@ -46,6 +58,8 @@ def load_drowsiness_config(path: str, fps: float) -> Dict[str, Any]:
             "frequency_window_sec": as_float(yawn.get("frequency_window_sec"), 120.0),
             "high_frequency_count": as_int(yawn.get("high_frequency_count"), 3),
             "timestamps_max": as_int(yawn.get("timestamps_max"), 10),
+            # NEW: reduce false yawns when hand is near face
+            "covered_mar_min": as_float(yawn.get("covered_mar_min"), 0.45),
         },
         "expression_suppression": {
             "smile_frames": sec_to_frames(sup.get("smile_suppress_sec"), fps, 0.5),

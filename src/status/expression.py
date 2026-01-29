@@ -1,37 +1,46 @@
 import logging
 import math
-import numpy as np
 from collections import deque
-from typing import List, Tuple
+from typing import List, Tuple, Sequence, Union
+
+import numpy as np
 
 from src.utils.constants import M_MAR
 
 log = logging.getLogger(__name__)
 
+
 class MouthExpressionClassifier:
     """
     Geometric Classifier for YAWN/SMILE/LAUGH/NEUTRAL.
-    Optimized: Uses squared Euclidean distance to avoid sqrt calls in hot loops.
+
+    NOTE:
+    - `_hand_obscures_mouth()` compares in normalized [0..1] coordinates.
+    - It supports hands in either normalized coords or pixel coords (auto-detected).
     """
 
-    EMA_ALPHA = 0.35           
-    PERSIST_FRAMES = 6         
+    EMA_ALPHA = 0.35
+    PERSIST_FRAMES = 6
 
     TH_YAWN_MAR = 0.55
     TH_SMILE_WIDTH_RATIO = 1.15
     TH_SMILE_MAR = 0.25
     TH_LAUGH_MAR = 0.40
 
-    HAND_FACE_PROX = 0.20      
-    # Pre-calculate squared threshold to avoid sqrt() in loops
-    HAND_MOUTH_PROX_SQ = 0.16 ** 2 
+    HAND_FACE_PROX = 0.20
+    HAND_MOUTH_PROX_SQ = 0.16 ** 2
 
     def __init__(self):
+        self._history = deque(maxlen=self.PERSIST_FRAMES)
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset per-user / per-session state (call when user changes)."""
         self._ema_mar = 0.0
         self._ema_width_ratio = 1.0
-        self._history = deque(maxlen=self.PERSIST_FRAMES)
         self._neutral_width = None
         self._frame_count = 0
+        self._history.clear()
 
     @staticmethod
     def _dist(p1: Tuple[int, int], p2: Tuple[int, int]) -> float:
@@ -45,34 +54,59 @@ class MouthExpressionClassifier:
             return 0.0
         return (A + B) / (2.0 * C)
 
-    def _hand_obscures_mouth(self, landmarks_px: List[Tuple[int, int]], img_w: int, img_h: int, hands_data) -> bool:
+    def _hand_obscures_mouth(
+        self,
+        landmarks_px: List[Tuple[int, int]],
+        img_w: int,
+        img_h: int,
+        hands_data,
+    ) -> bool:
+        """
+        Returns True if a detected hand keypoint is close to the mouth center.
+
+        Important:
+        - Mouth center is computed in normalized coords (mx,my in [0..1]).
+        - Hand points are accepted either as normalized coords or pixel coords.
+          If a point looks like pixels (>~2.0), it will be normalized by (img_w,img_h).
+        """
         if not hands_data or img_w <= 0 or img_h <= 0:
             return False
 
-        # Mouth center (lip corners) in px
+        # Mouth center normalized [0..1]
         lc = landmarks_px[M_MAR[0]]
         rc = landmarks_px[M_MAR[3]]
         mx = 0.5 * (lc[0] + rc[0]) / float(img_w)
         my = 0.5 * (lc[1] + rc[1]) / float(img_h)
 
-        thresh_sq = self.HAND_MOUTH_PROX_SQ
+        thresh_sq = float(self.HAND_MOUTH_PROX_SQ)
 
         for hand in hands_data:
             if not hand:
                 continue
-            
-            # Check Middle tip (12) and Index tip (8)
-            # Assumption: hand is List of tuples/lists
+
             hand_len = len(hand)
+
+            # Check Middle tip (12) and Index tip (8)
             for idx in (12, 8):
                 if idx >= hand_len:
                     continue
-                
+
                 pt = hand[idx]
-                dx = pt[0] - mx
-                dy = pt[1] - my
-                
-                # Optimized: Compare squared distance
+                if pt is None or len(pt) < 2:
+                    continue
+
+                hx = float(pt[0])
+                hy = float(pt[1])
+
+                # Auto-detect pixel coords vs normalized coords
+                # (normalized coords should be within [0..1]; pixels are typically >> 1)
+                if hx > 2.0 or hy > 2.0:
+                    hx = hx / float(img_w)
+                    hy = hy / float(img_h)
+
+                dx = hx - mx
+                dy = hy - my
+
                 if (dx * dx + dy * dy) < thresh_sq:
                     return True
 
@@ -104,7 +138,7 @@ class MouthExpressionClassifier:
         self._ema_width_ratio = (1 - alpha) * self._ema_width_ratio + alpha * width_ratio
 
         img_w_eff = int(img_w) if img_w else img_h
-        
+
         if self._hand_obscures_mouth(landmarks, img_w_eff, img_h, hands_data):
             self._history.append("OBSCURED")
             return self._stable_label()

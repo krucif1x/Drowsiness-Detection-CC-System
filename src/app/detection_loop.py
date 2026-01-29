@@ -114,13 +114,24 @@ class DetectionLoop:
         self._show_debug_deltas = False
 
         self.recognition_patience = 0
-        self.RECOGNITION_THRESHOLD = 45
+
+        # NEW: configurable patience (seconds ~= attempts because face-recog runs 1/sec)
+        self.RECOGNITION_THRESHOLD = int(os.getenv("DS_RECOGNITION_PATIENCE_SEC", "10"))  # was 45
+
+        # NEW: configurable face-recognition interval
+        self._fr_last_ts = 0.0
+        self._fr_interval_sec = float(os.getenv("DS_FACE_RECOG_INTERVAL_SEC", "1.0"))  # was 1.0
+
+        # NEW: face-loss + identity recheck controls
+        self._no_face_frames = 0
+        self._lost_face_frames_threshold = int(os.getenv("DS_LOST_FACE_FRAMES", "15"))  # ~0.5s at 30fps
+        self._id_last_check_ts = 0.0
+        self._id_recheck_interval_sec = float(os.getenv("DS_ID_RECHECK_SEC", "5.0"))  # periodic re-verify
+        self._id_mismatch_count = 0
+        self._id_mismatch_max = int(os.getenv("DS_ID_MISMATCH_MAX", "2"))
 
         if self.headless:
             log.info("Headless mode enabled (DS_HEADLESS=1): GUI windows/keyboard controls disabled.")
-
-        self._fr_last_ts = 0.0
-        self._fr_interval_sec = 1.0  # run face-recognition at most once/sec
 
     def _request_stop(self, *_args):
         self._stop_requested = True
@@ -320,12 +331,47 @@ class DetectionLoop:
 
     def detection(self, frame, display, results, hands_norm, fps):
         features = self.frame_processor.extract(frame, results)
+
+        # NEW: face-loss handling while detecting (prevents "new person becomes old user")
         if features is None:
             self.distraction_detector.set_face_visibility(0.0)
             self.visualizer.draw_no_face_text(display)
+
+            if self.current_mode == "DETECTING":
+                self._no_face_frames += 1
+                if self._no_face_frames >= self._lost_face_frames_threshold:
+                    self._drop_active_user("face_lost")
             return
 
+        # face is present this frame
+        self._no_face_frames = 0
         self.distraction_detector.set_face_visibility(features.face_confidence)
+
+        # NEW: periodic identity re-check even in DETECTING
+        # (lightweight: runs every DS_ID_RECHECK_SEC; prevents identity carryover after camera pans)
+        now = time.time()
+        if (
+            self.current_mode == "DETECTING"
+            and self.user is not None
+            and (now - self._id_last_check_ts) >= self._id_recheck_interval_sec
+        ):
+            self._id_last_check_ts = now
+            candidate = self.user_manager.find_best_match(frame)
+
+            if candidate is None:
+                self._id_mismatch_count += 1
+                if self._id_mismatch_count >= self._id_mismatch_max:
+                    self._drop_active_user("identity_unverified")
+                    return
+            else:
+                # verified (same user) or detected a different user
+                self._id_mismatch_count = 0
+                if candidate.user_id != getattr(self.user, "user_id", None):
+                    log.info("User changed: %s -> %s", getattr(self.user, "user_id", "?"), candidate.user_id)
+                    self.user = candidate
+                    self.detector.set_active_user(candidate)
+                    self.expression_classifier.reset()
+                    self._buzz_user_identified()
 
         out = self._run_detectors(frame, features, hands_norm)
 
@@ -396,6 +442,13 @@ class DetectionLoop:
             self.recognition_patience = 0
             return
 
+        # NEW: if no users exist yet, go straight to calibration (no waiting)
+        if not getattr(self.user_manager, "users", None):
+            self.visualizer.draw_no_user_text(display)
+            if self._post_calibration_cooldown <= 0:
+                self.calibration(frame_rgb)
+            return
+
         # If we already have an active user, do NOT run face recognition every frame.
         if self.user is not None and self.current_mode == "DETECTING":
             return
@@ -429,7 +482,6 @@ class DetectionLoop:
 
     def calibration(self, frame):
         log.info("Starting Calibration...")
-
         # Stop any ongoing buzzer output before calibration UI
         try:
             self.buzzer.off()
@@ -478,16 +530,15 @@ class DetectionLoop:
             # NEW: calibration success beep
             self._buzz_calibration_success()
 
-            new_id = len(self.user_manager.users) + 1
-
-            # Use RGB if camera supports it (consistent with face_recognition path)
+            # IMPORTANT: don't use len(self.user_manager.users)+1 (it may be empty/not loaded)
             try:
-                fresh_frame = self.camera.read(color="rgb")
-            except TypeError:
-                fresh_frame = self.camera.read()
+                new_id = self.user_manager.repo.get_next_user_id()
+            except Exception:
+                # fallback (still better than always 1)
+                new_id = int(time.time())
 
-            if fresh_frame is None:
-                fresh_frame = frame
+            # Keep frame consistent (already RGB here)
+            fresh_frame = frame
 
             new_user = self.user_manager.register_new_user(fresh_frame, result_threshold, new_id)
 
@@ -512,3 +563,29 @@ class DetectionLoop:
 
         self.recognition_patience = 0
         self._post_calibration_cooldown = 45
+
+    def _drop_active_user(self, reason: str) -> None:
+        """Drop current user and return to WAITING_FOR_USER safely."""
+        if self.user is None and self.current_mode == "WAITING_FOR_USER":
+            return
+
+        log.info("Dropping active user (reason=%s)", reason)
+        self.user = None
+        self.current_mode = "WAITING_FOR_USER"
+        self.recognition_patience = 0
+
+        # Reset per-user state so the next person doesn't inherit baselines
+        try:
+            self.detector.set_active_user(None)
+        except Exception:
+            pass
+        try:
+            self.expression_classifier.reset()
+        except Exception:
+            pass
+
+        # reset identity tracking
+        self._id_mismatch_count = 0
+        self._no_face_frames = 0
+        self._post_calibration_cooldown = 0
+        self._identity_prompted = False

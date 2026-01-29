@@ -19,6 +19,10 @@ class RemoteLogWorker:
     MAX_RETRIES_PER_ROW = 20
 
     def __init__(self, db_path: str, remote_api_url: Optional[str] = None, enabled: bool = True):
+        """
+        db_path: path to the MAIN events DB (contains user_profiles + drowsiness_events).
+        Remote queue/deadletter will be stored in a sidecar DB file so the main DB stays at 2 tables.
+        """
         self.enabled = enabled
         self._db_lock = threading.Lock()
 
@@ -29,7 +33,12 @@ class RemoteLogWorker:
         else:
             log.info("[REMOTE] Worker disabled")
 
-        self.queue_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+        # MAIN DB connection (read local events/images from here)
+        self.events_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+
+        # SIDE-CAR DB for queue tables (keeps main DB to 2 tables)
+        queue_db_path = f"{db_path}.remotequeue.db"
+        self.queue_conn = sqlite3.connect(queue_db_path, check_same_thread=False, timeout=30)
 
         with self._db_lock:
             self.queue_conn.execute("""
@@ -257,13 +266,16 @@ class RemoteLogWorker:
             log.error(f"[REMOTE] Queue error: {e}", exc_info=True)
 
     def _fetch_local_jpeg(self, local_event_id: int) -> Optional[bytes]:
-        """Fetch jpeg bytes from local drowsiness_events table."""
+        """Fetch jpeg bytes from MAIN local drowsiness_events table."""
         if not local_event_id:
             return None
         try:
             with self._db_lock:
-                cur = self.queue_conn.cursor()
-                cur.execute("SELECT img_drowsiness FROM drowsiness_events WHERE id = ? LIMIT 1", (int(local_event_id),))
+                cur = self.events_conn.cursor()
+                cur.execute(
+                    "SELECT img_drowsiness FROM drowsiness_events WHERE id = ? LIMIT 1",
+                    (int(local_event_id),)
+                )
                 row = cur.fetchone()
             if not row:
                 return None
@@ -295,7 +307,6 @@ class RemoteLogWorker:
                 except Exception:
                     dt = datetime.now()
 
-                # Rehydrate missing image from local events table
                 if not jpeg_bytes and local_event_id:
                     jpeg_bytes = self._fetch_local_jpeg(local_event_id)
                     if jpeg_bytes:
@@ -304,7 +315,6 @@ class RemoteLogWorker:
                             cur.execute("UPDATE remote_event_queue SET img_jpeg=? WHERE id=?", (jpeg_bytes, qid))
                             self.queue_conn.commit()
 
-                # If still missing, dead-letter (prevents HTTP 500 spam)
                 if not jpeg_bytes:
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     with self._db_lock:
@@ -339,8 +349,8 @@ class RemoteLogWorker:
                             (vehicle_vin, user_id, status, time, img_jpeg, alert_category, alert_detail, severity, local_event_id, retry_count, last_error, failed_at)
                             SELECT vehicle_vin, user_id, status, time, img_jpeg, alert_category, alert_detail, severity, local_event_id, retry_count, last_error, ?
                             FROM remote_event_queue
-                            WHERE id=?S
-                        """, (now_str, qid))
+                            WHERE id=?
+                        """, (now_str, qid))  # FIXED: was `WHERE id=?S`
                         cur.execute("DELETE FROM remote_event_queue WHERE id=?", (qid,))
                         log.error("[REMOTE] Dead-lettered queue row id=%s after %s retries", qid, new_retry)
                     else:
@@ -398,5 +408,8 @@ class RemoteLogWorker:
             self._send_thread.join()
         if self._retry_thread:
             self._retry_thread.join()
-        self.queue_conn.close()
+        try:
+            self.queue_conn.close()
+        finally:
+            self.events_conn.close()
         log.info("[REMOTE] Worker stopped")

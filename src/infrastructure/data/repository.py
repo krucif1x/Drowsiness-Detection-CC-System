@@ -18,6 +18,7 @@ class UnifiedRepository:
                 """
                 SELECT id, user_id, ear_threshold, face_encoding
                 FROM user_profiles
+                WHERE face_encoding IS NOT NULL
                 ORDER BY last_seen DESC
                 LIMIT ?
                 """,
@@ -29,13 +30,11 @@ class UnifiedRepository:
 
         users: List[UserProfile] = []
         for pid, uid, ear, enc_blob in rows:
-            if enc_blob is None:
-                continue
             try:
                 enc = np.frombuffer(enc_blob, dtype=np.float32)
                 users.append(UserProfile(pid, uid, float(ear), enc))
-            except Exception as e:
-                logging.error("Failed to load user %s: %s", uid, e)
+            except Exception:
+                logging.exception("Failed to load user %s", uid)
 
         logging.info("Loaded %d user(s)", len(users))
         return users

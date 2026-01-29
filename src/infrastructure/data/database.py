@@ -13,6 +13,7 @@ class UnifiedDatabase:
     def __init__(self, db_path: str):
         self.db_path = os.path.normpath(db_path)
         self._lock = threading.Lock()
+        self._local = threading.local()  # per-thread connection cache
 
         self._ensure_parent_dir(self.db_path)
         self._ensure_schema()
@@ -36,12 +37,28 @@ class UnifiedDatabase:
         os.makedirs(parent, exist_ok=True)
 
     def _connect(self) -> sqlite3.Connection:
+        # One connection per thread; default check_same_thread=True is fine in that case.
         conn = sqlite3.connect(self.db_path, timeout=10.0)
-        # Keep settings consistent for every connection
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._connect()
+            self._local.conn = conn
+        return conn
+
+    def _reset_conn(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._local.conn = None
 
     def _ensure_schema(self) -> None:
         """Create all tables if they don't exist (NO schema changes beyond what's already here)."""
@@ -109,31 +126,38 @@ class UnifiedDatabase:
 
     def execute(self, query: str, params: tuple = (), fetch: bool = False) -> Optional[Any]:
         """Execute query with retry logic. Returns rows (fetch=True) else lastrowid."""
-        with self._lock:
-            last_err: Optional[Exception] = None
+        last_err: Optional[Exception] = None
 
-            for attempt in range(self.DB_RETRY_ATTEMPTS):
-                try:
-                    with self._connect() as conn:
-                        cur = conn.execute(query, params)
-                        if fetch:
-                            return cur.fetchall()
-                        conn.commit()
-                        return cur.lastrowid
-                except sqlite3.OperationalError as e:
-                    last_err = e
-                    if attempt < self.DB_RETRY_ATTEMPTS - 1:
-                        logging.warning("DB locked, retry %d/%d", attempt + 1, self.DB_RETRY_ATTEMPTS)
-                        time.sleep(self.DB_RETRY_DELAY * (attempt + 1))
-                    else:
-                        logging.error("DB operation failed: %s", e)
-                        raise
+        for attempt in range(self.DB_RETRY_ATTEMPTS):
+            try:
+                with self._lock:
+                    conn = self._get_conn()
+                    cur = conn.execute(query, params)
+                    if fetch:
+                        return cur.fetchall()
+                    conn.commit()
+                    return cur.lastrowid
+            except sqlite3.OperationalError as e:
+                last_err = e
 
-            # Should never reach here, but keep type checkers happy
-            if last_err:
-                raise last_err
-            return None
+                # If connection got into a bad state, recreate it for this thread
+                msg = str(e).lower()
+                if "closed" in msg or "cannot operate on a closed database" in msg:
+                    self._reset_conn()
+
+                if attempt < self.DB_RETRY_ATTEMPTS - 1:
+                    logging.warning("DB locked/operational error, retry %d/%d: %s", attempt + 1, self.DB_RETRY_ATTEMPTS, e)
+                    time.sleep(self.DB_RETRY_DELAY * (attempt + 1))
+                    continue
+
+                logging.error("DB operation failed: %s", e)
+                raise
+
+        if last_err:
+            raise last_err
+        return None
 
     def close(self) -> None:
-        # No persistent connection, so nothing to close
+        # Close current thread's connection (if any)
+        self._reset_conn()
         return

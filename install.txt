@@ -1,9 +1,0 @@
-- install picamera gunain
-sudo apt-get install python3-picamera2
-
-- buat venv dan include system wide packages karena gatau kenapa pycamera2 cuma keinstal di root aja.
-sudo su
-python3 -m venv --system-site-packages venv
-source /home/cc/Documents/drowsiness_detection/venv/bin/activate
-pip install --no-deps opencv-python
-pip install --no-deps mediapipe

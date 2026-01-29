@@ -1,0 +1,97 @@
+SYSTEMD SERVICE FILE – COMPLETE BEGINNER GUIDE
+
+This guide explains how to use systemd to run your Python program
+automatically on a Raspberry Pi at boot.
+
+  ------------------------------------------------------------
+  1. WHAT IS SYSTEMD?
+  ------------------------------------------------------------
+  systemd is the Linux service manager. It starts programs
+  automatically, keeps them running, and manages background
+  services.
+
+  We use it so your project runs: • Automatically at boot •
+  Without logging in • Even without a monitor (headless mode)
+  ------------------------------------------------------------
+
+2. WHERE IS THE SERVICE FILE?
+
+Custom services are stored in:
+
+/etc/systemd/system/
+
+Your file name: dd.service
+
+Full path: /etc/systemd/system/dd.service
+
+  ------------------------------------------------------------
+  3. HOW TO OPEN OR EDIT THE SERVICE FILE
+  ------------------------------------------------------------
+  sudo nano /etc/systemd/system/dd.service
+
+  After editing ALWAYS run: sudo systemctl daemon-reload
+  ------------------------------------------------------------
+
+4. BASIC STRUCTURE OF A SYSTEMD SERVICE FILE
+
+[Unit] Description=Your Project Name After=network.target
+
+[Service] User=cc WorkingDirectory=/home/cc/Downloads/dd_2025
+ExecStart=/home/cc/Downloads/dd_2025/venv/bin/python
+/home/cc/Downloads/dd_2025/main.py Restart=always
+
+[Install] WantedBy=multi-user.target
+
+  ------------------------------------------------------------
+  5. IMPORTANT PARTS EXPLAINED
+  ------------------------------------------------------------
+  Description → Name of your service After → Waits for system
+  components before starting User → Linux user running the
+  program WorkingDirectory → Project folder ExecStart → The
+  command that runs your program Restart=always → Restarts if
+  it crashes WantedBy → Makes it start at boot
+
+  ------------------------------------------------------------
+
+6. START / STOP COMMANDS
+
+Start service: sudo systemctl start dd.service
+
+Stop service: sudo systemctl stop dd.service
+
+Restart service: sudo systemctl restart dd.service
+
+Check status: sudo systemctl status dd.service
+
+  ------------------------------------------------------------
+  7. ENABLE OR DISABLE AUTO START
+  ------------------------------------------------------------
+  Enable at boot: sudo systemctl enable dd.service
+
+  Disable auto start: sudo systemctl disable dd.service
+  ------------------------------------------------------------
+
+8. VIEW LOGS (VERY IMPORTANT)
+
+See live logs: journalctl -u dd.service -f
+
+See previous logs: journalctl -u dd.service
+
+  ------------------------------------------------------------
+  9. WHEN TO USE SYSTEMD
+  ------------------------------------------------------------
+  Use systemd when: • Your program must run automatically • No
+  display/keyboard is connected • You want stability and
+  auto-restart
+
+  ------------------------------------------------------------
+
+10. TROUBLESHOOTING
+
+If it fails: 1. Check logs 2. Confirm file paths are correct 3. Confirm
+Python venv path is correct 4. Make sure hardware (camera, sensors) is
+ready
+
+  --------------
+  END OF GUIDE
+  --------------
