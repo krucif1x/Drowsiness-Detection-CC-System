@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 class DrowsinessSystem:
     CONFIG_PATH = "config/detector_config.yaml"
-    DB_PATH = "data/drowsiness_events.db"
+    DB_PATH = os.getenv("CC_DB_PATH", os.path.join("data", "cc.db"))
 
     def __init__(self):
         self._ensure_paths()

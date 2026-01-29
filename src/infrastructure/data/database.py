@@ -63,10 +63,23 @@ class UnifiedDatabase:
     def _ensure_schema(self) -> None:
         """Create all tables if they don't exist (NO schema changes beyond what's already here)."""
         with self._connect() as conn:
-            # User Profiles
+            def _table_exists(name: str) -> bool:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (name,),
+                ).fetchone()
+                return row is not None
+
+            # Rename legacy tables if needed
+            if _table_exists("user_profiles") and not _table_exists("users"):
+                conn.execute("ALTER TABLE user_profiles RENAME TO users")
+            if _table_exists("drowsiness_events") and not _table_exists("events"):
+                conn.execute("ALTER TABLE drowsiness_events RENAME TO events")
+
+            # Users
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS user_profiles (
+                CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL UNIQUE,
                     full_name TEXT,
@@ -77,13 +90,13 @@ class UnifiedDatabase:
                 )
                 """
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON user_profiles(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_last_seen ON user_profiles(last_seen)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON users(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_last_seen ON users(last_seen)")
 
-            # Drowsiness Events
+            # Events
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS drowsiness_events (
+                CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vehicle_identification_number TEXT,
                     user_id INTEGER,
@@ -99,28 +112,11 @@ class UnifiedDatabase:
                 """
             )
 
-            # Migration for existing DBs (does NOT add anything new beyond existing intent)
-            cursor = conn.execute("PRAGMA table_info(drowsiness_events)")
-            existing_columns = {row[1] for row in cursor.fetchall()}
-
-            new_columns = {
-                "alert_category": "TEXT",
-                "alert_detail": "TEXT",
-                "severity": "TEXT",
-            }
-
-            for col_name, col_type in new_columns.items():
-                if col_name not in existing_columns:
-                    try:
-                        conn.execute(f"ALTER TABLE drowsiness_events ADD COLUMN {col_name} {col_type}")
-                        logging.info("✓ Added column: %s", col_name)
-                    except sqlite3.OperationalError as e:
-                        logging.warning("Column %s might already exist: %s", col_name, e)
-
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON drowsiness_events(time)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_user ON drowsiness_events(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_category ON drowsiness_events(alert_category)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON drowsiness_events(severity)")
+            # Indexes (use the NEW table name)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(time)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_category ON events(alert_category)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)")
 
             conn.commit()
 

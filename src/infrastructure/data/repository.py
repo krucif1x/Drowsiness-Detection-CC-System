@@ -17,7 +17,7 @@ class UnifiedRepository:
             self.db.execute(
                 """
                 SELECT id, user_id, ear_threshold, face_encoding
-                FROM user_profiles
+                FROM users
                 WHERE face_encoding IS NOT NULL
                 ORDER BY last_seen DESC
                 LIMIT ?
@@ -45,24 +45,28 @@ class UnifiedRepository:
 
         rowid = self.db.execute(
             """
-            INSERT INTO user_profiles (user_id, ear_threshold, face_encoding, last_seen)
+            INSERT INTO users (user_id, ear_threshold, face_encoding, last_seen)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                ear_threshold = excluded.ear_threshold,
+                face_encoding = excluded.face_encoding,
+                last_seen = excluded.last_seen
             """,
             (int(user.user_id), float(user.ear_threshold), encoding_bytes, datetime.now()),
         )
-        return int(rowid)
+        return int(rowid) if rowid is not None else -1
 
     def update_last_seen(self, user_id: int):
         self.db.execute(
             """
-            UPDATE user_profiles SET last_seen = ? WHERE user_id = ?
+            UPDATE users SET last_seen = ? WHERE user_id = ?
             """,
             (datetime.now(), int(user_id)),
         )
 
     def get_next_user_id(self) -> int:
         try:
-            result = self.db.execute("SELECT MAX(user_id) FROM user_profiles", fetch=True)
+            result = self.db.execute("SELECT MAX(user_id) FROM users", fetch=True)
             max_id = result[0][0] if result and result[0][0] else 0
             return int(max_id) + 1
         except Exception as e:
@@ -72,18 +76,21 @@ class UnifiedRepository:
     # --- DROWSINESS EVENT METHODS ---
     def add_event(self, event: DrowsinessEvent) -> int:
         try:
+            status = (event.status or "pending").strip().lower()
             rowid = self.db.execute(
                 """
-                INSERT INTO drowsiness_events
-                (vehicle_identification_number, user_id, time, status, img_drowsiness,
-                 duration, value, alert_category, alert_detail, severity)
+                INSERT INTO events (
+                    vehicle_identification_number, user_id, time, status,
+                    img_drowsiness, duration, value,
+                    alert_category, alert_detail, severity
+                )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.vehicle_identification_number,
                     int(event.user_id),
-                    event.time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(event.time, "strftime") else str(event.time),
-                    event.status,
+                    event._fmt_time(),
+                    status,
                     event.img_drowsiness,
                     float(event.duration),
                     float(event.value),
@@ -92,14 +99,7 @@ class UnifiedRepository:
                     event.severity,
                 ),
             )
-            logging.info(
-                "Event saved: row_id=%s, %s - %s (%s)",
-                rowid,
-                event.alert_category,
-                event.alert_detail,
-                event.severity,
-            )
-            return int(rowid)
+            return int(rowid) if rowid is not None else -1
         except Exception as e:
-            logging.error("Database Insert Failed: %s", e, exc_info=True)
+            logging.error("Failed to add event: %s", e)
             return -1
