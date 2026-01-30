@@ -2,20 +2,45 @@ import time
 from collections import deque
 
 class FpsTracker:
-    """Tracks and calculates Frames Per Second."""
-    def __init__(self):
-        self.prev_time = time.time()
-        self.current_fps = 0.0
+    """
+    Measures FPS over a sampling window (stable), optionally with EMA smoothing.
+
+    Call update() exactly once per processed/rendered frame.
+    """
+    def __init__(self, sample_period_sec: float = 0.5, ema_alpha: float | None = None):
+        self.sample_period_sec = float(sample_period_sec)
+        self.ema_alpha = ema_alpha  # e.g. 0.2 for smoothing, or None to disable
+
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+        self._frames = 0
+
+        self.current_fps = 0.0          # last reported windowed fps
+        self.smoothed_fps = 0.0         # EMA of windowed fps (if enabled)
 
     def update(self) -> float:
-        """Updates time and returns current FPS."""
-        curr_time = time.time()
-        elapsed = curr_time - self.prev_time
-        self.prev_time = curr_time
-        
-        if elapsed > 0:
-            self.current_fps = 1.0 / elapsed
-        return self.current_fps
+        now = time.perf_counter()
+        self._frames += 1
+
+        elapsed = now - self._t0
+        if elapsed >= self.sample_period_sec:
+            fps = self._frames / elapsed
+            self.current_fps = fps
+
+            if self.ema_alpha is not None:
+                a = float(self.ema_alpha)
+                if self.smoothed_fps == 0.0:
+                    self.smoothed_fps = fps
+                else:
+                    self.smoothed_fps = a * fps + (1.0 - a) * self.smoothed_fps
+
+            # reset window
+            self._t0 = now
+            self._frames = 0
+
+        self._last = now
+        return self.smoothed_fps if self.ema_alpha is not None else self.current_fps
+
 
 class RollingAverage:
     """
@@ -28,20 +53,15 @@ class RollingAverage:
         self.current_sum = 0.0
 
     def update(self, value: float) -> float:
-        """
-        Adds a new value and returns the smoothed average.
-        Handles the running sum efficiently.
-        """
         if value is None:
             return self.get_average()
 
-        # If buffer is full, subtract the oldest value before it falls off
         if len(self.buffer) == self.buffer.maxlen:
             self.current_sum -= self.buffer[0]
 
         self.buffer.append(value)
         self.current_sum += value
-        
+
         return self.current_sum / len(self.buffer)
 
     def get_average(self) -> float:

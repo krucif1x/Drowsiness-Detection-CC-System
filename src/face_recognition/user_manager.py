@@ -67,8 +67,10 @@ class UserManager:
             'avg_match_distance': []
         }
 
+        # Face-recognition logging throttle (reduce spam)
         self._fr_log_last_ts = 0.0
-        self._fr_log_interval_sec = 2.0  # log at most once every 2 seconds
+        self._fr_log_interval_sec = float(os.getenv("DS_FR_LOG_INTERVAL_SEC", "10.0"))
+        self._fr_last_kind: str | None = None
 
         self.load_users()
         logging.info(f"UserManager initialized successfully with threshold={recognition_threshold}")
@@ -86,11 +88,16 @@ class UserManager:
             self.users = []
             self._user_id_map = {}
 
-    def _rate_limited_info(self, msg: str) -> None:
+    def _rate_limited_log(self, kind: str, msg: str, level: int = logging.INFO) -> None:
+        """
+        Log at most once per interval per 'kind' (e.g., no_match/match/fast_match),
+        and immediately when the kind changes.
+        """
         now = time.time()
-        if (now - self._fr_log_last_ts) >= self._fr_log_interval_sec:
+        if self._fr_last_kind != kind or (now - self._fr_log_last_ts) >= self._fr_log_interval_sec:
+            self._fr_last_kind = kind
             self._fr_log_last_ts = now
-            logging.info(msg)
+            logging.log(level, msg)
 
     def find_best_match(self, image_frame, use_metadata: bool = False) -> Optional[UserProfile]:
         """
@@ -108,9 +115,9 @@ class UserManager:
         if use_metadata:
             encoding, metadata = self.recognizer.extract(image_frame, return_metadata=True)
             if encoding is None:
-                logging.debug(f"Extraction failed: {metadata}")
+                logging.debug("Extraction failed: %s", metadata)
                 return None
-            logging.debug(f"Extraction metadata: {metadata}")
+            logging.debug("Extraction metadata: %s", metadata)
         else:
             encoding = self.recognizer.extract(image_frame)
             if encoding is None:
@@ -128,18 +135,28 @@ class UserManager:
         if self.multi_frame_validation:
             self._recent_matches.append(best_user.user_id if best_user else None)
 
+        # Detailed numbers -> DEBUG (so INFO stays quiet)
+        logging.debug(
+            "FR candidate=%s dist=%.4f threshold=%.4f",
+            (best_user.user_id if best_user else None),
+            float(dist),
+            float(self.recognition_threshold),
+        )
+
         if (best_user is None) or (dist >= self.recognition_threshold):
             self._match_stats['failed_matches'] += 1
-            self._rate_limited_info(
-                f"✗ NO MATCH (Closest: User {best_user.user_id if best_user else 'N/A'}, "
-                f"Distance: {dist:.4f}, Threshold: {self.recognition_threshold})"
+            self._rate_limited_log(
+                "no_match",
+                f"FaceRec: NO MATCH (threshold={self.recognition_threshold:.2f})",
+                level=logging.INFO,
             )
             return None
 
         if dist <= (self.recognition_threshold * self.fast_accept_ratio):
-            self._rate_limited_info(
-                f"✓ FAST MATCH: User ID {best_user.user_id} "
-                f"(Distance: {dist:.4f}, Threshold: {self.recognition_threshold})"
+            self._rate_limited_log(
+                "fast_match",
+                f"FaceRec: FAST MATCH user_id={best_user.user_id}",
+                level=logging.INFO,
             )
             self._match_stats['successful_matches'] += 1
             self.repo.update_last_seen(best_user.user_id)
@@ -161,9 +178,10 @@ class UserManager:
             if most_common_id != best_user.user_id:
                 return None
 
-        self._rate_limited_info(
-            f"✓ MATCH FOUND: User ID {best_user.user_id} "
-            f"(Distance: {dist:.4f}, Threshold: {self.recognition_threshold})"
+        self._rate_limited_log(
+            "match",
+            f"FaceRec: MATCH user_id={best_user.user_id}",
+            level=logging.INFO,
         )
         self._match_stats['successful_matches'] += 1
         self.repo.update_last_seen(best_user.user_id)
