@@ -6,22 +6,9 @@ Minimal changes to your original working code.
 import cv2
 import numpy as np
 import logging
+from src.utils.landmarks.constants import MODEL_POINTS, LANDMARK_INDICES
 
 logger = logging.getLogger(__name__)
-
-
-# Your original model points (these were working for pitch/yaw)
-MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),             # Nose tip
-    (0.0, 330.0, -65.0),         # Chin
-    (-225.0, -170.0, -135.0),    # Left eye corner
-    (225.0, -170.0, -135.0),     # Right eye corner
-    (-150.0, 150.0, -125.0),     # Left mouth corner
-    (150.0, 150.0, -125.0)       # Right mouth corner
-], dtype=np.float64)
-
-LANDMARK_INDICES = [1, 152, 33, 263, 61, 291]
-
 
 class HeadPoseEstimator:
     """Simple head pose estimator with camera specs."""

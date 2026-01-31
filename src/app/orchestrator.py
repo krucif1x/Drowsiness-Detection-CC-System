@@ -10,7 +10,7 @@ from src.logging.remote_logger import RemoteLogWorker
 from src.logging.system_logger import SystemLogger
 from src.infrastructure.data.database import UnifiedDatabase
 from src.infrastructure.data.repository import UnifiedRepository
-from src.mediapipe.mediapipe_wrapper import MediaPipeFaceModel
+from src.mediapipe.face_mesh import MediaPipeFaceModel
 from src.app.detection_loop import DetectionLoop
 
 log = logging.getLogger(__name__)

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from src.utils.load_detector_config import load_yaml_section
-from src.utils.config_utils import as_float, as_int, get_section
+from src.utils.config.yaml_loader import load_yaml_section
+from src.utils.config.parsing import as_float, as_int, get_section
 
 
 def load_distraction_config(path: str) -> Dict[str, Any]:

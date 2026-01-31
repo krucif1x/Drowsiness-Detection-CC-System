@@ -5,7 +5,7 @@ from typing import List, Tuple, Sequence, Union
 
 import numpy as np
 
-from src.utils.constants import M_MAR
+from src.utils.landmarks.constants import M_MAR
 
 log = logging.getLogger(__name__)
 

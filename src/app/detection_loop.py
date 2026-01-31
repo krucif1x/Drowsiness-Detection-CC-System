@@ -11,13 +11,13 @@ from src.core.status_aggregator import StatusAggregator
 from src.status.distraction.detector import DistractionDetector
 from src.status.drowsiness.detector import DrowsinessDetector
 from src.status.expression import MouthExpressionClassifier
-from src.mediapipe.hand import MediaPipeHandsWrapper
+from src.mediapipe.hand import HandsModel
 from src.mediapipe.head_pose import HeadPoseEstimator
-from src.utils.constants import L_EAR, M_MAR, R_EAR
-from src.utils.constants import LEFT_EYE, RIGHT_EYE  # add: canonical eye indices used in calibration
+from src.mediapipe.face_mesh import FaceMeshModel  # <-- add
+from src.utils.landmarks.constants import L_EAR, M_MAR, R_EAR, LEFT_EYE, RIGHT_EYE
 from src.utils.ui.metrics_tracker import FpsTracker, RollingAverage
 from src.utils.ui.visualization import Visualizer
-from src.calibration.ratios import MAR  # changed: MAR now lives in calibration/ratios.py
+from src.calibration.ratios import MAR
 from src.core.frame_processing import FrameProcessor, HandsPipeline
 from src.infrastructure.hardware.buzzer import Buzzer  
 
@@ -28,7 +28,6 @@ class DetectionLoop:
     def __init__(
         self,
         camera,
-        face_mesh,
         user_manager,
         system_logger,
         vehicle_vin,
@@ -38,7 +37,16 @@ class DetectionLoop:
         **kwargs,
     ):
         self.camera = camera
-        self.face_mesh = face_mesh
+
+        # Own FaceMesh lifecycle here (no external injection)
+        self.face_mesh = FaceMeshModel(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+
         self.user_manager = user_manager
         self.logger = system_logger
 
@@ -87,7 +95,7 @@ class DetectionLoop:
         self.expression_classifier = MouthExpressionClassifier()
 
         # Hands: infer on interval; cache normalized hands
-        self.hand_wrapper = MediaPipeHandsWrapper(max_num_hands=2)
+        self.hand_wrapper = HandsModel(max_num_hands=2)
         self.hands_pipeline = HandsPipeline(self.hand_wrapper, inference_interval_frames=5)
 
         self.fps_tracker = FpsTracker()
@@ -226,6 +234,12 @@ class DetectionLoop:
                 pass
             try:
                 self.hand_wrapper.close()
+            except Exception:
+                pass
+
+            # NEW: close FaceMesh model too
+            try:
+                self.face_mesh.close()
             except Exception:
                 pass
 

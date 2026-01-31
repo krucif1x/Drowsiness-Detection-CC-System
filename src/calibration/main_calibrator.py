@@ -9,7 +9,7 @@ import numpy as np
 from src.calibration.ratios import EAR
 from src.calibration.ui import feedback as draw_feedback
 from src.face_recognition.user_manager import UserManager
-from src.utils.constants import LEFT_EYE, RIGHT_EYE
+from src.utils.landmarks.constants import LEFT_EYE, RIGHT_EYE
 
 
 class EARCalibrator:

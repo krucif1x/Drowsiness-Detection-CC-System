@@ -2,6 +2,8 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from src.utils.landmarks.constants import HandIdx  # <-- add
+
 log = logging.getLogger(__name__)
 
 
@@ -57,7 +59,7 @@ def normalize_hands(hands_data, w: int, h: int):
         if not hand:
             continue
 
-        first_pt = hand[0]
+        first_pt = hand[HandIdx.WRIST] 
         # Heuristic: if x/y > 1.0 assume pixels
         is_pixel_coords = (first_pt[0] > 1.0) or (first_pt[1] > 1.0)
 

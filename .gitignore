@@ -205,3 +205,78 @@ cython_debug/
 # App/runtime logs
 logs/
 *.log
+
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Native extensions ---
+*.so
+
+# --- Virtual environments / env files ---
+.venv/
+venv/
+env/
+ENV/
+.env
+.envrc
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+MANIFEST
+
+# --- Test / coverage / tooling caches ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+
+# --- Jupyter / IPython ---
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# --- Docs site builds ---
+docs/_build/
+site/
+
+# --- IDE/editor ---
+# (Keep these tracked if your team commits shared settings)
+.idea/
+.vscode/
+.spyderproject
+.spyproject
+.ropeproject
+
+# --- App/runtime logs ---
+logs/
+*.log
+
+# --- Misc / tool-specific ---
+.pdm-python
+.pdm-build/
+.pixi/
+__pypackages__/
+.cursorignore
+.cursorindexingignore
+.abstra/
+
+# --- Local DBs (only if you truly never want them committed) ---
+db.sqlite3
+db.sqlite3-journal
+
+# --- Sensitive PyPI config (recommended to ignore) ---
+.pypirc
